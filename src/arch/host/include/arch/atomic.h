@@ -6,11 +6,12 @@
  *         Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
  */
 
-#ifndef __ARCH_ATOMIC_H_
-#define __ARCH_ATOMIC_H_
+#ifdef __SOF_ATOMIC_H__
+
+#ifndef __ARCH_ATOMIC_H__
+#define __ARCH_ATOMIC_H__
 
 #include <stdint.h>
-#include <errno.h>
 
 typedef struct {
 	volatile int32_t value;
@@ -42,4 +43,10 @@ static inline int32_t arch_atomic_sub(atomic_t *a, int32_t value)
 	return __sync_fetch_and_sub(&a->value, value);
 }
 
-#endif
+#endif /* __ARCH_ATOMIC_H__ */
+
+#else
+
+#error "This file shouldn't be included from outside of sof/atomic.h"
+
+#endif /* __SOF_ATOMIC_H__ */

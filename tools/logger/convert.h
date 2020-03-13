@@ -11,12 +11,14 @@
  */
 
 #include <stdio.h>
-#include <user/trace.h>
 #include <ipc/info.h>
 #include <rimage/file_format.h>
 
 #define KNRM	"\x1B[0m"
 #define KRED	"\x1B[31m"
+#define KGRN	"\x1B[32m"
+#define KYEL	"\x1B[33m"
+#define KBLU	"\x1B[34m"
 
 struct convert_config {
 	const char *out_file;
@@ -34,6 +36,7 @@ struct convert_config {
 	int use_colors;
 	int serial_fd;
 	int raw_output;
+	struct snd_sof_uids_header *uids_dict;
 };
 
-int convert(const struct convert_config *config);
+int convert(struct convert_config *config);

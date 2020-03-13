@@ -4,16 +4,18 @@
 //
 // Author: Daniel Baluta <daniel.baluta@nxp.com>
 
-#include <platform/timer.h>
-#include <platform/interrupt.h>
-#include <sof/debug.h>
 #include <sof/audio/component.h>
+#include <sof/drivers/interrupt.h>
 #include <sof/drivers/timer.h>
+#include <sof/lib/memory.h>
+#include <sof/platform.h>
+#include <ipc/stream.h>
+#include <errno.h>
 #include <stdint.h>
 
 void platform_timer_start(struct timer *timer)
 {
-	arch_timer_enable(timer);
+	//nothing to do on IMX for cpu timer
 }
 
 void platform_timer_stop(struct timer *timer)
@@ -21,7 +23,7 @@ void platform_timer_stop(struct timer *timer)
 	arch_timer_disable(timer);
 }
 
-int platform_timer_set(struct timer *timer, uint64_t ticks)
+int64_t platform_timer_set(struct timer *timer, uint64_t ticks)
 {
 	return arch_timer_set(timer, ticks);
 }
@@ -60,7 +62,7 @@ void platform_dai_timestamp(struct comp_dev *dai,
 		posn->flags |= SOF_TIME_DAI_VALID;
 
 	/* get SSP wallclock - DAI sets this to stream start value */
-	posn->wallclock = timer_get_system(platform_timer) - posn->wallclock;
+	posn->wallclock = timer_get_system(timer_get()) - posn->wallclock;
 	posn->flags |= SOF_TIME_WALL_VALID | SOF_TIME_WALL_64;
 }
 
@@ -68,31 +70,45 @@ void platform_dai_timestamp(struct comp_dev *dai,
 void platform_dai_wallclock(struct comp_dev *dai, uint64_t *wallclock)
 {
 	/* only 1 wallclock on imx8 */
-	*wallclock = timer_get_system(platform_timer);
+	*wallclock = timer_get_system(timer_get());
 }
 
 int timer_register(struct timer *timer, void(*handler)(void *arg), void *arg)
 {
+	int ret;
+
 	switch (timer->id) {
 	case TIMER0:
 	case TIMER1:
-		return arch_timer_register(timer, handler, arg);
+		ret = arch_timer_register(timer, handler, arg);
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	platform_shared_commit(timer, sizeof(*timer));
+
+	return ret;
 }
 
-void timer_unregister(struct timer *timer)
+void timer_unregister(struct timer *timer, void *arg)
 {
-	interrupt_unregister(timer->irq);
+	interrupt_unregister(timer->irq, arg);
+
+	platform_shared_commit(timer, sizeof(*timer));
 }
 
-void timer_enable(struct timer *timer)
+void timer_enable(struct timer *timer, void *arg, int core)
 {
-	interrupt_enable(timer->irq);
+	interrupt_enable(timer->irq, arg);
+
+	platform_shared_commit(timer, sizeof(*timer));
 }
 
-void timer_disable(struct timer *timer)
+void timer_disable(struct timer *timer, void *arg, int core)
 {
-	interrupt_disable(timer->irq);
+	interrupt_disable(timer->irq, arg);
+
+	platform_shared_commit(timer, sizeof(*timer));
 }

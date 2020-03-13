@@ -7,9 +7,10 @@
  *         Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef AUDIO_FORMAT_H
-#define AUDIO_FORMAT_H
+#ifndef __SOF_AUDIO_FORMAT_H__
+#define __SOF_AUDIO_FORMAT_H__
 
+#include <ipc/stream.h>
 #include <stdint.h>
 
 /* Maximum and minimum values for 24 bit */
@@ -45,9 +46,11 @@
 	 (qx + qy - qz) : INT32_MIN) : INT32_MAX)
 
 /* Convert a float number to fractional Qnx.ny format. Note that there is no
- * check for nx+ny number of bits to fit the word length of int.
+ * check for nx+ny number of bits to fit the word length of int. The parameter
+ * qy must be 31 or less.
  */
-#define Q_CONVERT_FLOAT(f, qy)  ((int)((f) * (1 << qy) + 0.5)) /* f is float */
+#define Q_CONVERT_FLOAT(f, qy) \
+	((int32_t)(((const double)f) * ((int64_t)1 << (const int)qy) + 0.5))
 
 /* Convert fractional Qnx.ny number x to float */
 #define Q_CONVERT_QTOF(x, ny) ((float)(x) / ((int64_t)1 << (ny)))
@@ -158,4 +161,15 @@ static inline int32_t sign_extend_s24(int32_t x)
 	return (x << 8) >> 8;
 }
 
-#endif
+static inline uint32_t get_sample_bytes(enum sof_ipc_frame fmt)
+{
+	return fmt == SOF_IPC_FRAME_S16_LE ? 2 : 4;
+}
+
+static inline uint32_t get_frame_bytes(enum sof_ipc_frame fmt,
+				       uint32_t channels)
+{
+	return get_sample_bytes(fmt) * channels;
+}
+
+#endif /* __SOF_AUDIO_FORMAT_H__ */

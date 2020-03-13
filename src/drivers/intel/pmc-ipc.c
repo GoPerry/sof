@@ -4,17 +4,16 @@
 //
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 
-#include <sof/debug.h>
-#include <sof/timer.h>
-#include <sof/interrupt.h>
-#include <sof/ipc.h>
-#include <sof/sof.h>
-#include <sof/alloc.h>
-#include <sof/wait.h>
-#include <sof/trace.h>
-#include <platform/interrupt.h>
-#include <platform/pmc.h>
-#include <platform/shim.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
+#include <sof/drivers/pmc.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/shim.h>
+#include <sof/lib/wait.h>
+#include <sof/platform.h>
+#include <ipc/topology.h>
+#include <errno.h>
+#include <stdint.h>
 
 /* private data for IPC */
 struct intel_ipc_pmc_data {
@@ -134,13 +133,12 @@ int platform_ipc_pmc_init(void)
 	uint32_t imrlpesc;
 
 	/* init ipc data */
-	_pmc = rmalloc(RZONE_SYS, SOF_MEM_CAPS_RAM,
+	_pmc = rmalloc(SOF_MEM_ZONE_SYS, 0, SOF_MEM_CAPS_RAM,
 		       sizeof(struct intel_ipc_pmc_data));
 
 	/* configure interrupt */
-	interrupt_register(IRQ_NUM_EXT_PMC, IRQ_AUTO_UNMASK, irq_handler,
-			   NULL);
-	interrupt_enable(IRQ_NUM_EXT_PMC);
+	interrupt_register(IRQ_NUM_EXT_PMC, irq_handler, _pmc);
+	interrupt_enable(IRQ_NUM_EXT_PMC, _pmc);
 
 	/* Unmask Busy and Done interrupts */
 	imrlpesc = shim_read(SHIM_IMRLPESC);

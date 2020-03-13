@@ -5,6 +5,9 @@
  * Author: Seppo Ingalsuo <seppo.ingalsuo@linux.intel.com>
  */
 
+#ifndef __SOF_AUDIO_COEFFICIENTS_SRC_SRC_TINY_INT16_TABLE_H__
+#define __SOF_AUDIO_COEFFICIENTS_SRC_SRC_TINY_INT16_TABLE_H__
+
 /* SRC conversions */
 #include <sof/audio/coefficients/src/src_tiny_int16_1_3_1814_5000.h>
 #include <sof/audio/coefficients/src/src_tiny_int16_1_6_1814_5000.h>
@@ -18,6 +21,8 @@
 #include <sof/audio/coefficients/src/src_tiny_int16_21_20_1667_5000.h>
 #include <sof/audio/coefficients/src/src_tiny_int16_24_25_1814_5000.h>
 #include <sof/audio/coefficients/src/src_tiny_int16_25_24_1814_5000.h>
+#include <sof/audio/src/src.h>
+#include <stdint.h>
 
 /* SRC table */
 int16_t fir_one = 16384;
@@ -77,3 +82,5 @@ struct src_stage *src_table2[6][6] = {
 	 &src_int16_1_1_0_0, &src_int16_1_1_0_0
 	}
 };
+
+#endif /* __SOF_AUDIO_COEFFICIENTS_SRC_SRC_TINY_INT16_TABLE_H__ */

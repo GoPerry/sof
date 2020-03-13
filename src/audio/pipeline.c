@@ -5,26 +5,28 @@
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
-#include <stdint.h>
-#include <stddef.h>
-#include <errno.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/alloc.h>
-#include <sof/debug.h>
-#include <sof/ipc.h>
-#include <sof/lock.h>
-#include <platform/timer.h>
-#include <platform/platform.h>
+#include <sof/audio/buffer.h>
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
 #include <sof/drivers/timer.h>
-#include <sof/cpu.h>
-#include <sof/idc.h>
-#include <platform/idc.h>
-#include <sof/schedule.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/mailbox.h>
+#include <sof/list.h>
+#include <sof/math/numbers.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/schedule.h>
+#include <sof/schedule/task.h>
+#include <sof/spinlock.h>
+#include <sof/string.h>
+#include <ipc/header.h>
+#include <ipc/stream.h>
+#include <ipc/topology.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /* generic pipeline data used by pipeline_comp_* functions */
 struct pipeline_data {
@@ -35,37 +37,45 @@ struct pipeline_data {
 	int cmd;
 };
 
-static uint64_t pipeline_task(void *arg);
+static enum task_state pipeline_task(void *arg);
 
 /* create new pipeline - returns pipeline id or negative error */
 struct pipeline *pipeline_new(struct sof_ipc_pipe_new *pipe_desc,
 			      struct comp_dev *cd)
 {
+	struct sof_ipc_stream_posn posn;
 	struct pipeline *p;
-	uint32_t type;
+	int ret;
 
-	trace_pipe("pipeline_new()");
+	pipe_cl_info("pipeline_new()");
 
 	/* allocate new pipeline */
-	p = rzalloc(RZONE_RUNTIME, SOF_MEM_CAPS_RAM, sizeof(*p));
+	p = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM, sizeof(*p));
 	if (!p) {
-		trace_pipe_error("pipeline_new() error: Out of Memory");
+		pipe_cl_err("pipeline_new() error: Out of Memory");
 		return NULL;
 	}
 
 	/* init pipeline */
 	p->sched_comp = cd;
+	p->posn_offset = pipe_desc->pipeline_id *
+		sizeof(struct sof_ipc_stream_posn);
 	p->status = COMP_STATE_INIT;
 
-	spinlock_init(&p->lock);
-	assert(!memcpy_s(&p->ipc_pipe, sizeof(p->ipc_pipe),
-	   pipe_desc, sizeof(*pipe_desc)));
+	ret = memcpy_s(&p->ipc_pipe, sizeof(p->ipc_pipe),
+		       pipe_desc, sizeof(*pipe_desc));
+	assert(!ret);
 
-	/* get pipeline task type */
-	type = pipeline_is_timer_driven(p) ? SOF_SCHEDULE_LL :
-		SOF_SCHEDULE_EDF;
-	schedule_task_init(&p->pipe_task, type, pipe_desc->priority,
-			   pipeline_task, p, pipe_desc->core, 0);
+	/* just for retrieving valid ipc_msg header */
+	ipc_build_stream_posn(&posn, SOF_IPC_STREAM_TRIG_XRUN,
+			      p->ipc_pipe.comp_id);
+
+	p->msg = ipc_msg_init(posn.rhdr.hdr.cmd, sizeof(posn));
+	if (!p->msg) {
+		pipe_cl_err("pipeline_new() error: ipc_msg_init failed");
+		rfree(p);
+		return NULL;
+	}
 
 	return p;
 }
@@ -73,14 +83,16 @@ struct pipeline *pipeline_new(struct sof_ipc_pipe_new *pipe_desc,
 int pipeline_connect(struct comp_dev *comp, struct comp_buffer *buffer,
 		     int dir)
 {
-	trace_pipe("pipeline: connect comp %d and buffer %d",
-		   comp->comp.id, buffer->ipc_buffer.comp.id);
+	uint32_t flags;
 
-	spin_lock(&comp->lock);
+	pipe_cl_info("pipeline: connect comp %d and buffer %d",
+		     dev_comp_id(comp), buffer->id);
+
+	irq_local_disable(flags);
 	list_item_prepend(buffer_comp_list(buffer, dir),
 			  comp_buffer_list(comp, dir));
 	buffer_set_comp(buffer, comp, dir);
-	spin_unlock(&comp->lock);
+	irq_local_enable(flags);
 
 	return 0;
 }
@@ -89,9 +101,13 @@ int pipeline_connect(struct comp_dev *comp, struct comp_buffer *buffer,
  * It requires function pointer for recursion.
  */
 static int pipeline_for_each_comp(struct comp_dev *current,
-				  int (*func)(struct comp_dev *, void *, int),
+				  int (*func)(struct comp_dev *,
+					      struct comp_buffer *, void *,
+					      int),
 				  void *data,
-				  void (*buff_func)(struct comp_buffer *),
+				  void (*buff_func)(struct comp_buffer *,
+						    void *),
+				  void *buff_data,
 				  int dir)
 {
 	struct list_item *buffer_list = comp_buffer_list(current, dir);
@@ -106,7 +122,7 @@ static int pipeline_for_each_comp(struct comp_dev *current,
 
 		/* execute operation on buffer */
 		if (buff_func)
-			buff_func(buffer);
+			buff_func(buffer, buff_data);
 
 		buffer_comp = buffer_get_comp(buffer, dir);
 
@@ -116,7 +132,7 @@ static int pipeline_for_each_comp(struct comp_dev *current,
 
 		/* continue further */
 		if (func) {
-			err = func(buffer_comp, data, dir);
+			err = func(buffer_comp, buffer, data, dir);
 			if (err < 0)
 				break;
 		}
@@ -125,27 +141,27 @@ static int pipeline_for_each_comp(struct comp_dev *current,
 	return err;
 }
 
-static int pipeline_comp_complete(struct comp_dev *current, void *data,
+static int pipeline_comp_complete(struct comp_dev *current,
+				  struct comp_buffer *calling_buf, void *data,
 				  int dir)
 {
 	struct pipeline_data *ppl_data = data;
 
-	tracev_pipe_with_ids(ppl_data->p, "pipeline_comp_complete(), "
-			     "current->comp.id = %u, dir = %u",
-			     current->comp.id, dir);
+	pipe_dbg(ppl_data->p, "pipeline_comp_complete(), current->comp.id = %u, dir = %u",
+		 dev_comp_id(current), dir);
 
 	if (!comp_is_single_pipeline(current, ppl_data->start)) {
-		tracev_pipe_with_ids(ppl_data->p, "pipeline_comp_complete(), "
-				     "current is from another pipeline");
+		pipe_dbg(ppl_data->p, "pipeline_comp_complete(), current is from another pipeline");
 		return 0;
 	}
 
 	/* complete component init */
 	current->pipeline = ppl_data->p;
-	current->frames = ppl_data->p->ipc_pipe.frames_per_sched;
+	current->period = ppl_data->p->ipc_pipe.period;
+	current->priority = ppl_data->p->ipc_pipe.priority;
 
 	pipeline_for_each_comp(current, &pipeline_comp_complete, data,
-			       NULL, dir);
+			       NULL, NULL, dir);
 
 	return 0;
 }
@@ -155,12 +171,11 @@ int pipeline_complete(struct pipeline *p, struct comp_dev *source,
 {
 	struct pipeline_data data;
 
-	trace_pipe_with_ids(p, "pipeline_complete()");
+	pipe_info(p, "pipeline_complete()");
 
 	/* check whether pipeline is already completed */
 	if (p->status != COMP_STATE_INIT) {
-		trace_pipe_error_with_ids(p, "pipeline_complete() error: "
-					  "Pipeline already completed");
+		pipe_err(p, "pipeline_complete() error: Pipeline already completed");
 		return -EINVAL;
 	}
 
@@ -170,7 +185,7 @@ int pipeline_complete(struct pipeline *p, struct comp_dev *source,
 	/* now walk downstream from source component and
 	 * complete component task and pipeline initialization
 	 */
-	pipeline_comp_complete(source, &data, PPL_DIR_DOWNSTREAM);
+	pipeline_comp_complete(source, NULL, &data, PPL_DIR_DOWNSTREAM);
 
 	p->source_comp = source;
 	p->sink_comp = sink;
@@ -182,16 +197,18 @@ int pipeline_complete(struct pipeline *p, struct comp_dev *source,
 	return 0;
 }
 
-static int pipeline_comp_free(struct comp_dev *current, void *data, int dir)
+static int pipeline_comp_free(struct comp_dev *current,
+			      struct comp_buffer *calling_buf, void *data,
+			      int dir)
 {
 	struct pipeline_data *ppl_data = data;
+	uint32_t flags;
 
-	tracev_pipe("pipeline_comp_free(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_free(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
 	if (!comp_is_single_pipeline(current, ppl_data->start)) {
-		tracev_pipe("pipeline_comp_free(), "
-			    "current is from another pipeline");
+		pipe_cl_dbg("pipeline_comp_free(), current is from another pipeline");
 		return 0;
 	}
 
@@ -199,12 +216,12 @@ static int pipeline_comp_free(struct comp_dev *current, void *data, int dir)
 	current->pipeline = NULL;
 
 	pipeline_for_each_comp(current, &pipeline_comp_free, data,
-			       NULL, dir);
+			       NULL, NULL, dir);
 
 	/* disconnect source from buffer */
-	spin_lock(&current->lock);
+	irq_local_disable(flags);
 	list_item_del(comp_buffer_list(current, dir));
-	spin_unlock(&current->lock);
+	irq_local_enable(flags);
 
 	return 0;
 }
@@ -214,24 +231,31 @@ int pipeline_free(struct pipeline *p)
 {
 	struct pipeline_data data;
 
-	trace_pipe_with_ids(p, "pipeline_free()");
+	pipe_info(p, "pipeline_free()");
 
 	/* make sure we are not in use */
-	if (p->source_comp->state > COMP_STATE_READY) {
-		trace_pipe_error_with_ids(p, "pipeline_free() error: Pipeline"
-					  " in use, %u, %u",
-					  p->source_comp->comp.id,
-					  p->source_comp->state);
-		return -EBUSY;
+	if (p->source_comp) {
+		if (p->source_comp->state > COMP_STATE_READY) {
+			pipe_err(p, "pipeline_free() error: Pipeline in use, %u, %u",
+				 dev_comp_id(p->source_comp),
+				 p->source_comp->state);
+			return -EBUSY;
+		}
+
+		data.start = p->source_comp;
+
+		/* disconnect components */
+		pipeline_comp_free(p->source_comp, NULL, &data,
+				   PPL_DIR_DOWNSTREAM);
 	}
 
 	/* remove from any scheduling */
-	schedule_task_free(&p->pipe_task);
+	if (p->pipe_task) {
+		schedule_task_free(p->pipe_task);
+		rfree(p->pipe_task);
+	}
 
-	data.start = p->source_comp;
-
-	/* disconnect components */
-	pipeline_comp_free(p->source_comp, &data, PPL_DIR_DOWNSTREAM);
+	ipc_msg_free(p->msg);
 
 	/* now free the pipeline */
 	rfree(p);
@@ -242,15 +266,70 @@ int pipeline_free(struct pipeline *p)
 	return 0;
 }
 
-static int pipeline_comp_params(struct comp_dev *current, void *data, int dir)
+/* save params changes made by component */
+static void pipeline_update_buffer_pcm_params(struct comp_buffer *buffer,
+					      void *data)
+{
+	struct sof_ipc_stream_params *params = data;
+	int i;
+
+	params->buffer_fmt = buffer->buffer_fmt;
+	params->frame_fmt = buffer->stream.frame_fmt;
+	params->rate = buffer->stream.rate;
+	params->channels = buffer->stream.channels;
+	for (i = 0; i < SOF_IPC_MAX_CHANNELS; i++)
+		params->chmap[i] = buffer->chmap[i];
+}
+
+/* fetch hardware stream parameters from DAI and propagate them to the remaining
+ * buffers in pipeline.
+ */
+static int pipeline_comp_hw_params(struct comp_dev *current,
+				   struct comp_buffer *calling_buf, void *data,
+				   int dir)
+{
+	struct pipeline_data *ppl_data = data;
+	int ret = 0;
+	uint32_t flags = 0;
+
+	pipe_cl_dbg("pipeline_comp_hw_params(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
+
+	pipeline_for_each_comp(current, &pipeline_comp_hw_params, data, NULL,
+			       NULL, dir);
+
+	/* Fetch hardware stream parameters from DAI component */
+	if (dev_comp_type(current) == SOF_COMP_DAI) {
+		ret = comp_dai_get_hw_params(current,
+					     &ppl_data->params->params, dir);
+		if (ret < 0) {
+			pipe_cl_err("pipeline_find_dai_comp(): comp_dai_get_hw_params() error.");
+			return ret;
+		}
+	}
+
+	/* set buffer parameters */
+	if (calling_buf) {
+		buffer_lock(calling_buf, &flags);
+		buffer_set_params(calling_buf, &ppl_data->params->params,
+				  BUFFER_UPDATE_IF_UNSET);
+		buffer_unlock(calling_buf, flags);
+	}
+
+	return ret;
+}
+
+static int pipeline_comp_params(struct comp_dev *current,
+				struct comp_buffer *calling_buf, void *data,
+				int dir)
 {
 	struct pipeline_data *ppl_data = data;
 	int stream_direction = ppl_data->params->params.direction;
 	int end_type;
 	int err = 0;
 
-	tracev_pipe("pipeline_comp_params(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_params(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
 	if (!comp_is_single_pipeline(current, ppl_data->start)) {
 		/* If pipeline connected to the starting one is in improper
@@ -278,18 +357,17 @@ static int pipeline_comp_params(struct comp_dev *current, void *data, int dir)
 	if (current->state == COMP_STATE_ACTIVE)
 		return 0;
 
-	/* send current params to the component */
-	current->params = ppl_data->params->params;
+	/* set comp direction */
+	current->direction = ppl_data->params->params.direction;
 
-	err = comp_params(current);
+	err = comp_params(current, &ppl_data->params->params);
 	if (err < 0 || err == PPL_STATUS_PATH_STOP)
 		return err;
 
-	/* save params changes made by component */
-	ppl_data->params->params = current->params;
-
 	return pipeline_for_each_comp(current, &pipeline_comp_params, data,
-				      NULL, dir);
+				      &pipeline_update_buffer_pcm_params,
+				      &ppl_data->params->params,
+				      dir);
 }
 
 /* Send pipeline component params from host to endpoints.
@@ -307,37 +385,98 @@ static int pipeline_comp_params(struct comp_dev *current, void *data, int dir)
 int pipeline_params(struct pipeline *p, struct comp_dev *host,
 		    struct sof_ipc_pcm_params *params)
 {
+	struct sof_ipc_pcm_params hw_params;
 	struct pipeline_data data;
+	int dir = params->params.direction;
 	int ret;
-	uint32_t flags;
 
-	trace_pipe_with_ids(p, "pipeline_params()");
+	pipe_info(p, "pipe params dir %d frame_fmt %d buffer_fmt %d rate %d",
+		  params->params.direction, params->params.frame_fmt,
+		  params->params.buffer_fmt, params->params.rate);
+	pipe_info(p, "pipe params stream_tag %d channels %d sample_valid_bytes %d sample_container_bytes %d",
+		  params->params.stream_tag, params->params.channels,
+		  params->params.sample_valid_bytes,
+		  params->params.sample_container_bytes);
 
+	/* settin hw params */
+	data.start = host;
+	data.params = &hw_params;
+
+	ret = pipeline_comp_hw_params(data.start, NULL, &data, dir);
+	if (ret < 0) {
+		pipe_cl_err("pipeline_prepare() error: ret = %d, dev->comp.id = %u",
+			    ret, dev_comp_id(host));
+		return ret;
+	}
+
+	/* setting pcm params */
 	data.params = params;
 	data.start = host;
 
-	spin_lock_irq(&p->lock, flags);
-
-	ret = pipeline_comp_params(host, &data, host->params.direction);
+	ret = pipeline_comp_params(host, NULL, &data, params->params.direction);
 	if (ret < 0) {
-		trace_pipe_error("pipeline_params() error: ret = %d, host->"
-				 "comp.id = %u", ret, host->comp.id);
+		pipe_cl_err("pipeline_params() error: ret = %d, host->comp.id = %u",
+			    ret, dev_comp_id(host));
 	}
-
-	spin_unlock_irq(&p->lock, flags);
 
 	return ret;
 }
 
-static int pipeline_comp_prepare(struct comp_dev *current, void *data, int dir)
+static struct task *pipeline_task_init(struct pipeline *p, uint32_t type,
+				       enum task_state (*func)(void *data))
+{
+	struct pipeline_task *task = NULL;
+
+	task = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
+		       sizeof(*task));
+	if (!task)
+		return NULL;
+
+	if (schedule_task_init_ll(&task->task, type, p->ipc_pipe.priority, func,
+				  p, p->ipc_pipe.core, 0) < 0) {
+		rfree(task);
+		return NULL;
+	}
+
+	task->sched_comp = p->sched_comp;
+	task->registrable = p == p->sched_comp->pipeline;
+
+	return &task->task;
+}
+
+static int pipeline_comp_task_init(struct pipeline *p)
+{
+	uint32_t type;
+
+	/* initialize task if necessary */
+	if (!p->pipe_task) {
+		/* right now we always consider pipeline as a low latency
+		 * component, but it may change in the future
+		 */
+		type = pipeline_is_timer_driven(p) ? SOF_SCHEDULE_LL_TIMER :
+			SOF_SCHEDULE_LL_DMA;
+
+		p->pipe_task = pipeline_task_init(p, type, pipeline_task);
+		if (!p->pipe_task) {
+			pipe_cl_err("pipeline_prepare() error: task init failed");
+			return -ENOMEM;
+		}
+	}
+
+	return 0;
+}
+
+static int pipeline_comp_prepare(struct comp_dev *current,
+				 struct comp_buffer *calling_buf, void *data,
+				 int dir)
 {
 	int err = 0;
 	struct pipeline_data *ppl_data = data;
-	int stream_direction = ppl_data->start->params.direction;
+	int stream_direction = dir;
 	int end_type;
 
-	tracev_pipe("pipeline_comp_prepare(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_prepare(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
 	if (!comp_is_single_pipeline(current, ppl_data->start)) {
 		/* If pipeline connected to the starting one is in improper
@@ -360,95 +499,48 @@ static int pipeline_comp_prepare(struct comp_dev *current, void *data, int dir)
 		}
 	}
 
+	err = pipeline_comp_task_init(current->pipeline);
+	if (err < 0)
+		return err;
+
 	err = comp_prepare(current);
 	if (err < 0 || err == PPL_STATUS_PATH_STOP)
 		return err;
 
 	return pipeline_for_each_comp(current, &pipeline_comp_prepare, data,
-				      &buffer_reset_pos, dir);
+				      &buffer_reset_pos, NULL, dir);
 }
 
-/* prepare the pipeline for usage - preload host buffers here */
+/* prepare the pipeline for usage */
 int pipeline_prepare(struct pipeline *p, struct comp_dev *dev)
 {
 	struct pipeline_data ppl_data;
 	int ret = 0;
-	uint32_t flags;
 
-	trace_pipe_with_ids(p, "pipeline_prepare()");
+	pipe_info(p, "pipe prepare");
 
 	ppl_data.start = dev;
 
-	spin_lock_irq(&p->lock, flags);
-
-	ret = pipeline_comp_prepare(dev, &ppl_data, dev->params.direction);
+	ret = pipeline_comp_prepare(dev, NULL, &ppl_data, dev->direction);
 	if (ret < 0) {
-		trace_pipe_error("pipeline_prepare() error: ret = %d,"
-				 "dev->comp.id = %u", ret, dev->comp.id);
-		goto out;
+		pipe_cl_err("pipeline_prepare() error: ret = %d, dev->comp.id = %u",
+			    ret, dev_comp_id(dev));
+		return ret;
 	}
 
-	/* pipeline preload needed only for playback streams */
-	p->preload = dev->params.direction == SOF_IPC_STREAM_PLAYBACK;
 	p->status = COMP_STATE_PREPARE;
 
-out:
-	spin_unlock_irq(&p->lock, flags);
 	return ret;
-}
-
-static int pipeline_comp_cache(struct comp_dev *current, void *data, int dir)
-{
-	struct pipeline_data *ppl_data = data;
-
-	tracev_pipe("pipeline_comp_cache(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
-
-	comp_cache(current, ppl_data->cmd);
-
-	if (!comp_is_single_pipeline(current, ppl_data->start)) {
-		tracev_pipe("pipeline_comp_cache(), "
-			    "current is from another pipeline");
-		return 0;
-	}
-
-	return pipeline_for_each_comp(current, &pipeline_comp_cache, data,
-				      comp_buffer_cache_op(ppl_data->cmd),
-				      dir);
-}
-
-/* execute cache operation on pipeline */
-void pipeline_cache(struct pipeline *p, struct comp_dev *dev, int cmd)
-{
-	struct pipeline_data data;
-	uint32_t flags;
-
-	/* pipeline needs to be invalidated before usage */
-	if (cmd == CACHE_INVALIDATE)
-		dcache_invalidate_region(p, sizeof(*p));
-
-	trace_pipe_with_ids(p, "pipeline_cache()");
-
-	data.start = dev;
-	data.cmd = cmd;
-
-	spin_lock_irq(&p->lock, flags);
-
-	/* execute cache operation on components and buffers */
-	pipeline_comp_cache(dev, &data, dev->params.direction);
-
-	/* pipeline needs to be flushed after usage */
-	if (cmd == CACHE_WRITEBACK_INV)
-		dcache_writeback_invalidate_region(p, sizeof(*p));
-
-	spin_unlock_irq(&p->lock, flags);
 }
 
 static void pipeline_comp_trigger_sched_comp(struct pipeline *p,
 					     struct comp_dev *comp, int cmd)
 {
-	/* only required by the scheduling component */
-	if (p->sched_comp != comp)
+	/* only required by the scheduling component or sink component
+	 * on pipeline without one
+	 */
+	if (p->sched_comp != comp &&
+	    (p == p->sched_comp->pipeline || p->sink_comp != comp))
 		return;
 
 	switch (cmd) {
@@ -460,17 +552,8 @@ static void pipeline_comp_trigger_sched_comp(struct pipeline *p,
 		break;
 	case COMP_TRIGGER_RELEASE:
 	case COMP_TRIGGER_START:
+		pipeline_schedule_copy(p, 0);
 		p->xrun_bytes = 0;
-
-		/* playback pipelines need to be scheduled now,
-		 * capture pipelines are scheduled only for
-		 * timer driven scheduling
-		 */
-		if (comp->params.direction == SOF_IPC_STREAM_PLAYBACK ||
-		    pipeline_is_timer_driven(p)) {
-			/* schedule initial pipeline fill when next idle */
-			pipeline_schedule_copy_idle(p);
-		}
 		p->status = COMP_STATE_ACTIVE;
 		break;
 	case COMP_TRIGGER_SUSPEND:
@@ -480,24 +563,25 @@ static void pipeline_comp_trigger_sched_comp(struct pipeline *p,
 	}
 }
 
-static int pipeline_comp_trigger(struct comp_dev *current, void *data, int dir)
+static int pipeline_comp_trigger(struct comp_dev *current,
+				 struct comp_buffer *calling_buf, void *data,
+				 int dir)
 {
 	struct pipeline_data *ppl_data = data;
 	int is_single_ppl = comp_is_single_pipeline(current, ppl_data->start);
 	int is_same_sched =
 		pipeline_is_same_sched_comp(current->pipeline,
 					    ppl_data->start->pipeline);
-	int err = 0;
+	int err;
 
-	tracev_pipe("pipeline_comp_trigger(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_trigger(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
 	/* trigger should propagate to the connected pipelines,
 	 * which need to be scheduled together
 	 */
 	if (!is_single_ppl && !is_same_sched) {
-		tracev_pipe_with_ids(current->pipeline, "pipeline_comp_trigger"
-				     "(), current is from another pipeline");
+		pipe_dbg(current->pipeline, "pipeline_comp_trigger(), current is from another pipeline");
 		return 0;
 	}
 
@@ -510,45 +594,7 @@ static int pipeline_comp_trigger(struct comp_dev *current, void *data, int dir)
 					 ppl_data->cmd);
 
 	return pipeline_for_each_comp(current, &pipeline_comp_trigger, data,
-				      NULL, dir);
-}
-
-/* trigger pipeline on slave core */
-static int pipeline_trigger_on_core(struct pipeline *p, struct comp_dev *host,
-				    int cmd)
-{
-	struct idc_msg pipeline_trigger = { IDC_MSG_PPL_TRIGGER,
-		IDC_MSG_PPL_TRIGGER_EXT(cmd), p->ipc_pipe.core };
-	int ret;
-
-	/* check if requested core is enabled */
-	if (!cpu_is_core_enabled(p->ipc_pipe.core)) {
-		trace_pipe_error_with_ids(p, "pipeline_trigger_on_core() "
-					  "error: Requested core is not "
-					  "enabled, p->ipc_pipe.core = %u",
-					  p->ipc_pipe.core);
-		return -EINVAL;
-	}
-
-	/* writeback pipeline on start */
-	if (cmd == COMP_TRIGGER_START)
-		pipeline_cache(p, host, CACHE_WRITEBACK_INV);
-
-	/* send IDC pipeline trigger message */
-	ret = idc_send_msg(&pipeline_trigger, IDC_BLOCKING);
-	if (ret < 0) {
-		trace_pipe_error_with_ids(p, "pipeline_trigger_on_core() "
-					  "error: idc_send_msg returned %d, "
-					  "host->comp.id = %u, cmd = %d",
-					  ret, host->comp.id, cmd);
-		return ret;
-	}
-
-	/* invalidate pipeline on stop */
-	if (cmd == COMP_TRIGGER_STOP)
-		pipeline_cache(p, host, CACHE_INVALIDATE);
-
-	return ret;
+				      NULL, NULL, dir);
 }
 
 /*
@@ -570,12 +616,11 @@ static int pipeline_xrun_handle_trigger(struct pipeline *p, int cmd)
 	switch (cmd) {
 	case COMP_TRIGGER_START:
 		/* in xrun, prepare before trigger start needed */
-		trace_pipe_with_ids(p, "in xrun, prepare it first");
+		pipe_info(p, "in xrun, prepare it first");
 		/* prepare the pipeline */
 		ret = pipeline_prepare(p, p->source_comp);
 		if (ret < 0) {
-			trace_pipe_error_with_ids(p, "prepare error: ret = %d",
-						  ret);
+			pipe_err(p, "prepare error: ret = %d", ret);
 			return ret;
 		}
 		/* now ready for start, clear xrun_bytes */
@@ -583,7 +628,7 @@ static int pipeline_xrun_handle_trigger(struct pipeline *p, int cmd)
 		break;
 	case COMP_TRIGGER_STOP:
 		/* in xrun, suppose pipeline is already stopped, ignore it */
-		trace_pipe_with_ids(p, "already stopped in xrun");
+		pipe_info(p, "already stopped in xrun");
 		/* no more further trigger stop needed */
 		ret = PPL_STATUS_PATH_STOP;
 		break;
@@ -599,51 +644,43 @@ int pipeline_trigger(struct pipeline *p, struct comp_dev *host, int cmd)
 {
 	struct pipeline_data data;
 	int ret;
-	uint32_t flags;
 
-	trace_pipe_with_ids(p, "pipeline_trigger()");
+	pipe_info(p, "pipe trigger cmd %d", cmd);
 
 	/* handle pipeline global checks before going into each components */
 	if (p->xrun_bytes) {
 		ret = pipeline_xrun_handle_trigger(p, cmd);
 		if (ret < 0) {
-			trace_pipe_error_with_ids(p, "xrun handle error: "
-						  "ret = %d", ret);
+			pipe_err(p, "xrun handle error: ret = %d", ret);
 			return ret;
 		} else if (ret == PPL_STATUS_PATH_STOP)
 			/* no further action needed*/
 			return 0;
 	}
 
-	/* if current core is different than requested */
-	if (p->ipc_pipe.core != cpu_get_id())
-		return pipeline_trigger_on_core(p, host, cmd);
-
 	data.start = host;
 	data.cmd = cmd;
 
-	spin_lock_irq(&p->lock, flags);
-
-	ret = pipeline_comp_trigger(host, &data, host->params.direction);
+	ret = pipeline_comp_trigger(host, NULL, &data, host->direction);
 	if (ret < 0) {
-		trace_ipc_error("pipeline_trigger() error: ret = %d, host->"
-				"comp.id = %u, cmd = %d", ret, host->comp.id,
-				cmd);
+		pipe_cl_err("pipeline_trigger() error: ret = %d, host->comp.id = %u, cmd = %d",
+			    ret, dev_comp_id(host), cmd);
 	}
 
-	spin_unlock_irq(&p->lock, flags);
 	return ret;
 }
 
-static int pipeline_comp_reset(struct comp_dev *current, void *data, int dir)
+static int pipeline_comp_reset(struct comp_dev *current,
+			       struct comp_buffer *calling_buf, void *data,
+			       int dir)
 {
 	struct pipeline *p = data;
-	int stream_direction = p->source_comp->params.direction;
+	int stream_direction = dir;
 	int end_type;
 	int err = 0;
 
-	tracev_pipe("pipeline_comp_reset(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_reset(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
 	if (!comp_is_single_pipeline(current, p->source_comp)) {
 		/* If pipeline connected to the starting one is in improper
@@ -671,49 +708,44 @@ static int pipeline_comp_reset(struct comp_dev *current, void *data, int dir)
 		return err;
 
 	return pipeline_for_each_comp(current, &pipeline_comp_reset, data,
-				      NULL, dir);
+				      buffer_reset_params, NULL, dir);
 }
 
 /* reset the whole pipeline */
 int pipeline_reset(struct pipeline *p, struct comp_dev *host)
 {
 	int ret = 0;
-	uint32_t flags;
 
-	trace_pipe_with_ids(p, "pipeline_reset()");
+	pipe_info(p, "pipe reset");
 
-	spin_lock_irq(&p->lock, flags);
-
-	ret = pipeline_comp_reset(host, p, host->params.direction);
+	ret = pipeline_comp_reset(host, NULL, p, host->direction);
 	if (ret < 0) {
-		trace_ipc_error("pipeline_reset() error: ret = %d, host->comp."
-				"id = %u", ret, host->comp.id);
+		pipe_cl_err("pipeline_reset() error: ret = %d, host->comp.id = %u",
+			    ret, dev_comp_id(host));
 	}
 
-	spin_unlock_irq(&p->lock, flags);
 	return ret;
 }
 
-static int pipeline_comp_copy(struct comp_dev *current, void *data, int dir)
+static int pipeline_comp_copy(struct comp_dev *current,
+			      struct comp_buffer *calling_buf, void *data,
+			      int dir)
 {
 	struct pipeline_data *ppl_data = data;
 	int is_single_ppl = comp_is_single_pipeline(current, ppl_data->start);
-	int is_same_sched =
-		pipeline_is_same_sched_comp(current->pipeline, ppl_data->p);
-	int err = 0;
+	int err;
 
-	tracev_pipe("pipeline_comp_copy(), current->comp.id = %u, dir = %u",
-		    current->comp.id, dir);
+	pipe_cl_dbg("pipeline_comp_copy(), current->comp.id = %u, dir = %u",
+		    dev_comp_id(current), dir);
 
-	if (!is_single_ppl && !is_same_sched) {
-		tracev_pipe("pipeline_comp_copy(), current is from another "
-			    "pipeline and can't be scheduled together");
-		return err;
+	if (!is_single_ppl) {
+		pipe_cl_dbg("pipeline_comp_copy(), current is from another pipeline and can't be scheduled together");
+		return 0;
 	}
 
 	if (!comp_is_active(current)) {
-		tracev_pipe("pipeline_comp_copy(), current is not active");
-		return err;
+		pipe_cl_dbg("pipeline_comp_copy(), current is not active");
+		return 0;
 	}
 
 	/* copy to downstream immediately */
@@ -724,7 +756,7 @@ static int pipeline_comp_copy(struct comp_dev *current, void *data, int dir)
 	}
 
 	err = pipeline_for_each_comp(current, &pipeline_comp_copy,
-				     data, NULL, dir);
+				     data, NULL, NULL, dir);
 	if (err < 0 || err == PPL_STATUS_PATH_STOP)
 		return err;
 
@@ -736,10 +768,8 @@ static int pipeline_comp_copy(struct comp_dev *current, void *data, int dir)
 
 /* Copy data across all pipeline components.
  * For capture pipelines it always starts from source component
- * and continues downstream. For playback pipelines there are two
- * possibilities: for preload it starts from sink component and
- * continues upstream and if not preload, then it first copies
- * sink component itself and then goes upstream.
+ * and continues downstream and for playback pipelines it first
+ * copies sink component itself and then goes upstream.
  */
 static int pipeline_copy(struct pipeline *p)
 {
@@ -748,24 +778,9 @@ static int pipeline_copy(struct pipeline *p)
 	uint32_t dir;
 	int ret = 0;
 
-	if (p->source_comp->params.direction == SOF_IPC_STREAM_PLAYBACK) {
+	if (p->source_comp->direction == SOF_IPC_STREAM_PLAYBACK) {
 		dir = PPL_DIR_UPSTREAM;
 		start = p->sink_comp;
-
-		/* if not pipeline preload then copy sink comp first */
-		if (!p->preload) {
-			ret = comp_copy(start);
-			if (ret < 0) {
-				trace_pipe_error("pipeline_copy() error: "
-						 "ret = %d", ret);
-				return ret;
-			}
-
-			start = comp_get_previous(start, dir);
-			if (!start)
-				/* nothing else to do */
-				return ret;
-		}
 	} else {
 		dir = PPL_DIR_DOWNSTREAM;
 		start = p->source_comp;
@@ -774,15 +789,10 @@ static int pipeline_copy(struct pipeline *p)
 	data.start = start;
 	data.p = p;
 
-	ret = pipeline_comp_copy(start, &data, dir);
+	ret = pipeline_comp_copy(start, NULL, &data, dir);
 	if (ret < 0)
-		trace_pipe_error("pipeline_copy() error: ret = %d, start"
-				 "->comp.id = %u, dir = %u", ret,
-				 start->comp.id, dir);
-
-	/* stop preload only after full walkthrough */
-	if (ret != PPL_STATUS_PATH_STOP)
-		p->preload = false;
+		pipe_cl_err("pipeline_copy() error: ret = %d, start->comp.id = %u, dir = %u",
+			    ret, dev_comp_id(start), dir);
 
 	return ret;
 }
@@ -790,27 +800,27 @@ static int pipeline_copy(struct pipeline *p)
 /* Walk the graph to active components in any pipeline to find
  * the first active DAI and return it's timestamp.
  */
-static int pipeline_comp_timestamp(struct comp_dev *current, void *data,
+static int pipeline_comp_timestamp(struct comp_dev *current,
+				   struct comp_buffer *calling_buf, void *data,
 				   int dir)
 {
 	struct pipeline_data *ppl_data = data;
 
 	if (!comp_is_active(current)) {
-		tracev_pipe("pipeline_comp_timestamp(), "
-			    "current is not active");
+		pipe_cl_dbg("pipeline_comp_timestamp(), current is not active");
 		return 0;
 	}
 
 	/* is component a DAI endpoint? */
 	if (current != ppl_data->start &&
-	    (current->comp.type == SOF_COMP_DAI ||
-	    current->comp.type == SOF_COMP_SG_DAI)) {
+	    (dev_comp_type(current) == SOF_COMP_DAI ||
+	    dev_comp_type(current) == SOF_COMP_SG_DAI)) {
 		platform_dai_timestamp(current, ppl_data->posn);
 		return -1;
 	}
 
 	return pipeline_for_each_comp(current, &pipeline_comp_timestamp, data,
-				      NULL, dir);
+				      NULL, NULL, dir);
 }
 
 /* Get the timestamps for host and first active DAI found. */
@@ -824,27 +834,30 @@ void pipeline_get_timestamp(struct pipeline *p, struct comp_dev *host,
 	data.start = host;
 	data.posn = posn;
 
-	pipeline_comp_timestamp(host, &data, host->params.direction);
+	pipeline_comp_timestamp(host, NULL, &data, host->direction);
 
 	/* set timestamp resolution */
 	posn->timestamp_ns = p->ipc_pipe.period * 1000;
 }
 
-static int pipeline_comp_xrun(struct comp_dev *current, void *data, int dir)
+static int pipeline_comp_xrun(struct comp_dev *current,
+			      struct comp_buffer *calling_buf, void *data,
+			      int dir)
 {
 	struct pipeline_data *ppl_data = data;
 
-	if (current->comp.type == SOF_COMP_HOST) {
+	if (dev_comp_type(current) == SOF_COMP_HOST) {
 		/* get host timestamps */
 		platform_host_timestamp(current, ppl_data->posn);
 
-
 		/* send XRUN to host */
-		ipc_stream_send_xrun(current, ppl_data->posn);
+		mailbox_stream_write(ppl_data->p->posn_offset, ppl_data->posn,
+				     sizeof(*ppl_data->posn));
+		ipc_msg_send(ppl_data->p->msg, ppl_data->posn, true);
 	}
 
 	return pipeline_for_each_comp(current, &pipeline_comp_xrun, data, NULL,
-				      dir);
+				      NULL, dir);
 }
 
 /* Send an XRUN to each host for this component. */
@@ -866,17 +879,19 @@ void pipeline_xrun(struct pipeline *p, struct comp_dev *dev,
 	/* notify all pipeline comps we are in XRUN, and stop copying */
 	ret = pipeline_trigger(p, p->source_comp, COMP_TRIGGER_XRUN);
 	if (ret < 0)
-		trace_pipe_error_with_ids(p, "pipeline_xrun() error: "
-					  "Pipelines notification about XRUN "
-					  "failed, ret = %d", ret);
+		pipe_err(p, "pipeline_xrun() error: Pipelines notification about XRUN failed, ret = %d",
+			 ret);
 
 	memset(&posn, 0, sizeof(posn));
+	ipc_build_stream_posn(&posn, SOF_IPC_STREAM_TRIG_XRUN,
+			      dev_comp_id(dev));
 	p->xrun_bytes = bytes;
 	posn.xrun_size = bytes;
-	posn.xrun_comp_id = dev->comp.id;
+	posn.xrun_comp_id = dev_comp_id(dev);
 	data.posn = &posn;
+	data.p = p;
 
-	pipeline_comp_xrun(dev, &data, dev->params.direction);
+	pipeline_comp_xrun(dev, NULL, &data, dev->direction);
 }
 
 #if NO_XRUN_RECOVERY
@@ -892,14 +907,13 @@ static int pipeline_xrun_recover(struct pipeline *p)
 {
 	int ret;
 
-	trace_pipe_error_with_ids(p, "pipeline_xrun_recover()");
+	pipe_err(p, "pipeline_xrun_recover()");
 
 	/* prepare the pipeline */
 	ret = pipeline_prepare(p, p->source_comp);
 	if (ret < 0) {
-		trace_pipe_error_with_ids(p, "pipeline_xrun_recover() error: "
-					  "pipeline_prepare() failed, "
-					  "ret = %d", ret);
+		pipe_err(p, "pipeline_xrun_recover() error: pipeline_prepare() failed, ret = %d",
+			 ret);
 		return ret;
 	}
 
@@ -909,9 +923,8 @@ static int pipeline_xrun_recover(struct pipeline *p)
 	/* restart pipeline comps */
 	ret = pipeline_trigger(p, p->source_comp, COMP_TRIGGER_START);
 	if (ret < 0) {
-		trace_pipe_error_with_ids(p, "pipeline_xrun_recover() error: "
-					  "pipeline_trigger() failed, "
-					  "ret = %d", ret);
+		pipe_err(p, "pipeline_xrun_recover() error: pipeline_trigger() failed, ret = %d",
+			 ret);
 		return ret;
 	}
 
@@ -922,45 +935,28 @@ static int pipeline_xrun_recover(struct pipeline *p)
 /* notify pipeline that this component requires buffers emptied/filled */
 void pipeline_schedule_copy(struct pipeline *p, uint64_t start)
 {
-	if (p->sched_comp->state == COMP_STATE_ACTIVE)
-		schedule_task(&p->pipe_task, start, p->ipc_pipe.period, 0);
-}
-
-/* notify pipeline that this component requires buffers emptied/filled
- * when DSP is next idle. This is intended to be used to preload pipeline
- * buffers prior to trigger start.
- */
-void pipeline_schedule_copy_idle(struct pipeline *p)
-{
-	schedule_task(&p->pipe_task, 0, p->ipc_pipe.period,
-		      SOF_SCHEDULE_FLAG_IDLE);
+	schedule_task(p->pipe_task, start, p->ipc_pipe.period);
 }
 
 void pipeline_schedule_cancel(struct pipeline *p)
 {
-	int err;
-
-	/* cancel and wait for pipeline to complete */
-	err = schedule_task_cancel(&p->pipe_task);
-	if (err < 0)
-		trace_pipe_error_with_ids(p, "pipeline_schedule_cancel() "
-					  "error: schedule_task_cancel() "
-					  "failed, err = %d", err);
+	schedule_task_cancel(p->pipe_task);
 }
 
-static uint64_t pipeline_task(void *arg)
+static enum task_state pipeline_task(void *arg)
 {
 	struct pipeline *p = arg;
 	int err;
 
-	tracev_pipe_with_ids(p, "pipeline_task()");
+	pipe_dbg(p, "pipeline_task()");
 
 	/* are we in xrun ? */
 	if (p->xrun_bytes) {
 		/* try to recover */
 		err = pipeline_xrun_recover(p);
 		if (err < 0)
-			return 0;/* skip copy if still in xrun */
+			/* skip copy if still in xrun */
+			return SOF_TASK_STATE_COMPLETED;
 	}
 
 	err = pipeline_copy(p);
@@ -968,16 +964,13 @@ static uint64_t pipeline_task(void *arg)
 		/* try to recover */
 		err = pipeline_xrun_recover(p);
 		if (err < 0) {
-			trace_pipe_error_with_ids(p, "pipeline_task(): xrun "
-						  "recover failed! pipeline "
-						  "will be stopped!");
-			return 0; /* failed - host will stop this pipeline */
+			pipe_err(p, "pipeline_task(): xrun recover failed! pipeline will be stopped!");
+			/* failed - host will stop this pipeline */
+			return SOF_TASK_STATE_COMPLETED;
 		}
 	}
 
-	tracev_pipe("pipeline_task() sched");
+	pipe_cl_dbg("pipeline_task() sched");
 
-	/* automatically reschedule for timer or not finished preload */
-	return (pipeline_is_timer_driven(p) || p->preload) ?
-		p->ipc_pipe.period : 0;
+	return SOF_TASK_STATE_RESCHEDULE;
 }

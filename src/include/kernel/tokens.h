@@ -12,8 +12,8 @@
  * ** MUST BE ALIGNED WITH TOPOLOGY CONFIGURATION TOKEN VALUES **
  */
 
-#ifndef __INCLUDE_UAPI_USER_TOKENS_H__
-#define __INCLUDE_UAPI_USER_TOKENS_H__
+#ifndef __KERNEL_TOKENS_H__
+#define __KERNEL_TOKENS_H__
 
 /*
  * Kcontrol IDs
@@ -55,6 +55,12 @@
 #define SOF_TKN_SRC_RATE_IN			300
 #define SOF_TKN_SRC_RATE_OUT			301
 
+/* ASRC */
+#define SOF_TKN_ASRC_RATE_IN			320
+#define SOF_TKN_ASRC_RATE_OUT			321
+#define SOF_TKN_ASRC_ASYNCHRONOUS_MODE		322
+#define SOF_TKN_ASRC_OPERATION_MODE		323
+
 /* PCM */
 #define SOF_TKN_PCM_DMAC_CONFIG			353
 
@@ -73,6 +79,7 @@
 #define SOF_TKN_INTEL_SSP_FRAME_PULSE_WIDTH	503
 #define SOF_TKN_INTEL_SSP_QUIRKS		504
 #define SOF_TKN_INTEL_SSP_TDM_PADDING_PER_SLOT	505
+#define SOF_TKN_INTEL_SSP_BCLK_DELAY		506
 
 /* DMIC */
 #define SOF_TKN_INTEL_DMIC_DRIVER_VERSION	600
@@ -97,9 +104,19 @@
 #define SOF_TKN_TONE_SAMPLE_RATE		800
 
 /* Processing Components */
-#define SOF_TKN_PROCESS_TYPE                    900
+#define SOF_TKN_PROCESS_TYPE			900
 
 /* for backward compatibility */
 #define SOF_TKN_EFFECT_TYPE	SOF_TKN_PROCESS_TYPE
 
-#endif
+/* SAI */
+#define SOF_TKN_IMX_SAI_MCLK_ID			1000
+
+/* ESAI */
+#define SOF_TKN_IMX_ESAI_MCLK_ID		1100
+
+/* Led control for mute switches */
+#define SOF_TKN_MUTE_LED_USE			1300
+#define SOF_TKN_MUTE_LED_DIRECTION		1301
+
+#endif /* __KERNEL_TOKENS_H__ */

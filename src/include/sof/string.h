@@ -5,10 +5,11 @@
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
 
-#ifndef __INCLUDE_STRING_SOF__
-#define __INCLUDE_STRING_SOF__
+#ifndef __SOF_STRING_H__
+#define __SOF_STRING_H__
 
 #include <arch/string.h>
+#include <stddef.h>
 
 /* C memcpy for arch that don't have arch_memcpy() */
 void cmemcpy(void *dest, void *src, size_t size);
@@ -23,4 +24,4 @@ int rstrcmp(const char *s1, const char *s2);
 	cmemcpy(dest, src, size)
 #endif
 
-#endif
+#endif /* __SOF_STRING_H__ */

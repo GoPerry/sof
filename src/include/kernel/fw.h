@@ -10,8 +10,10 @@
  * Firmware file format .
  */
 
-#ifndef __INCLUDE_UAPI_USER_FW_H__
-#define __INCLUDE_UAPI_USER_FW_H__
+#ifndef __KERNEL_FW_H__
+#define __KERNEL_FW_H__
+
+#include <stdint.h>
 
 #define SND_SOF_FW_SIG_SIZE	4
 #define SND_SOF_FW_ABI		1
@@ -75,4 +77,4 @@ struct snd_sof_fw_header {
 	uint32_t abi;		/* version of header format */
 } __attribute__((packed));
 
-#endif
+#endif /* __KERNEL_FW_H__ */

@@ -7,17 +7,17 @@
 //         Rander Wang <rander.wang@intel.com>
 //         Janusz Jankowski <janusz.jankowski@linux.intel.com>
 
-#include <sof/sof.h>
-#include <sof/interrupt.h>
-#include <sof/interrupt-map.h>
-#include <sof/cpu.h>
-#include <arch/interrupt.h>
-#include <platform/interrupt.h>
-#include <platform/platform.h>
-#include <platform/shim.h>
+#include <sof/common.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/shim.h>
+#include <sof/list.h>
+#include <sof/spinlock.h>
+#include <config.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <cavs/version.h>
 
 /*
  * Number of status reload tries before warning the user we are in an IRQ
@@ -26,66 +26,97 @@
  */
 #define LVL2_MAX_TRIES		1000
 
+#if CONFIG_INTERRUPT_LEVEL_2
+const char irq_name_level2[] = "level2";
+#endif
+#if CONFIG_INTERRUPT_LEVEL_3
+const char irq_name_level3[] = "level3";
+#endif
+#if CONFIG_INTERRUPT_LEVEL_4
+const char irq_name_level4[] = "level4";
+#endif
+#if CONFIG_INTERRUPT_LEVEL_5
+const char irq_name_level5[] = "level5";
+#endif
+
 /*
  * The level2 handler attempts to try and fairly service interrupt sources by
  * servicing on first come first served basis. If two or more IRQs arrive at the
  * same time then they are serviced in order of ascending status bit.
  */
 static inline void irq_lvl2_handler(void *data, int level, uint32_t ilxsd,
-				    uint32_t ilxmsd, uint32_t ilxmcd)
+				    uint32_t ilxmsd)
 {
-	struct irq_desc *parent = (struct irq_desc *)data;
+	struct irq_desc *parent = data;
+	struct irq_cascade_desc *cascade = container_of(parent,
+						struct irq_cascade_desc, desc);
 	struct irq_desc *child = NULL;
+	int core = cpu_get_id();
 	struct list_item *clist;
 	uint32_t status;
-	uint32_t i = 0;
 	uint32_t tries = LVL2_MAX_TRIES;
+
+	platform_shared_commit(parent, sizeof(*parent));
 
 	/* read active interrupt status */
 	status = irq_read(ilxsd);
+	if (!status)
+		return;
 
 	/* handle each child */
-	while (irq_read(ilxsd)) {
+	for (;;) {
+		unsigned int bit = ffs(status) - 1;
+		bool handled = false;
 
-		/* are all IRQs serviced from last status ? */
-		if (status == 0x0) {
-			/* yes, so reload the new status and service again */
-			status = irq_read(ilxsd);
-			i = 0;
-			tries--;
+		status &= ~(1 << bit);
+
+		spin_lock(&cascade->lock);
+
+		/* get child if any and run handler */
+		list_for_item(clist, &cascade->child[bit].list) {
+			child = container_of(clist, struct irq_desc, irq_list);
+
+			if (child->handler && (child->cpu_mask & 1 << core)) {
+				/* run handler in non atomic context */
+				spin_unlock(&cascade->lock);
+				child->handler(child->handler_arg);
+				spin_lock(&cascade->lock);
+
+				handled = true;
+			}
+
+			platform_shared_commit(child, sizeof(*child));
 		}
 
+		platform_shared_commit(cascade, sizeof(*cascade));
+
+		spin_unlock(&cascade->lock);
+
+		if (!handled) {
+			/* nobody cared ? */
+			trace_irq_error("irq_lvl2_handler() error: "
+					"nobody cared level %d bit %d",
+					level, bit);
+			/* now mask it */
+			irq_write(ilxmsd, 0x1 << bit);
+		}
+
+		/* are all IRQs serviced from last status ? */
+		if (status)
+			continue;
+
+		/* yes, so reload the new status and service again */
+		status = irq_read(ilxsd);
+		if (!status)
+			break;
+
 		/* any devices continually interrupting / can't be cleared ? */
-		if (!tries) {
+		if (!--tries) {
 			tries = LVL2_MAX_TRIES;
 			trace_irq_error("irq_lvl2_handler() error: "
 					"IRQ storm at level %d status %08X",
 					level, irq_read(ilxsd));
 		}
-
-		/* any IRQ for this child bit ? */
-		if ((status & 0x1) == 0)
-			goto next;
-
-		/* get child if any and run handler */
-		list_for_item(clist, &parent->child[i]) {
-			child = container_of(clist, struct irq_desc, irq_list);
-
-			if (child && child->handler) {
-				child->handler(child->handler_arg);
-			} else {
-				/* nobody cared ? */
-				trace_irq_error("irq_lvl2_handler() error: "
-						"nobody cared level %d bit %d",
-						level, i);
-				/* now mask it */
-				irq_write(ilxmcd, 0x1 << i);
-			}
-		}
-
-next:
-		status >>= 1;
-		i++;
 	}
 }
 
@@ -93,131 +124,182 @@ next:
 				irq_lvl2_handler(data, \
 				 IRQ_NUM_EXT_LEVEL##n, \
 				 REG_IRQ_IL##n##SD(core), \
-				 REG_IRQ_IL##n##MSD(core), \
-				 REG_IRQ_IL##n##MCD(core))
+				 REG_IRQ_IL##n##MSD(core))
 
+#if CONFIG_INTERRUPT_LEVEL_2
 static void irq_lvl2_level2_handler(void *data)
 {
 	IRQ_LVL2_HANDLER(2);
 }
+#endif
 
+#if CONFIG_INTERRUPT_LEVEL_3
 static void irq_lvl2_level3_handler(void *data)
 {
 	IRQ_LVL2_HANDLER(3);
 }
+#endif
 
+#if CONFIG_INTERRUPT_LEVEL_4
 static void irq_lvl2_level4_handler(void *data)
 {
 	IRQ_LVL2_HANDLER(4);
 }
+#endif
 
+#if CONFIG_INTERRUPT_LEVEL_5
 static void irq_lvl2_level5_handler(void *data)
 {
 	IRQ_LVL2_HANDLER(5);
 }
-
-/* DSP internal interrupts */
-static struct irq_desc dsp_irq[PLATFORM_CORE_COUNT][4] = {
-	{{IRQ_NUM_EXT_LEVEL2, irq_lvl2_level2_handler, },
-	{IRQ_NUM_EXT_LEVEL3, irq_lvl2_level3_handler, },
-	{IRQ_NUM_EXT_LEVEL4, irq_lvl2_level4_handler, },
-	{IRQ_NUM_EXT_LEVEL5, irq_lvl2_level5_handler, } },
-#if PLATFORM_CORE_COUNT > 1
-	{{IRQ_NUM_EXT_LEVEL2, irq_lvl2_level2_handler, },
-	{IRQ_NUM_EXT_LEVEL3, irq_lvl2_level3_handler, },
-	{IRQ_NUM_EXT_LEVEL4, irq_lvl2_level4_handler, },
-	{IRQ_NUM_EXT_LEVEL5, irq_lvl2_level5_handler, } },
 #endif
-#if PLATFORM_CORE_COUNT > 2
-	{{IRQ_NUM_EXT_LEVEL2, irq_lvl2_level2_handler, },
-	{IRQ_NUM_EXT_LEVEL3, irq_lvl2_level3_handler, },
-	{IRQ_NUM_EXT_LEVEL4, irq_lvl2_level4_handler, },
-	{IRQ_NUM_EXT_LEVEL5, irq_lvl2_level5_handler, } },
-#endif
-#if PLATFORM_CORE_COUNT > 3
-	{{IRQ_NUM_EXT_LEVEL2, irq_lvl2_level2_handler, },
-	{IRQ_NUM_EXT_LEVEL3, irq_lvl2_level3_handler, },
-	{IRQ_NUM_EXT_LEVEL4, irq_lvl2_level4_handler, },
-	{IRQ_NUM_EXT_LEVEL5, irq_lvl2_level5_handler, } },
-#endif
-};
-
-struct irq_desc *platform_irq_get_parent(uint32_t irq)
-{
-	int core = SOF_IRQ_CPU(irq);
-
-	switch (SOF_IRQ_NUMBER(irq)) {
-	case IRQ_NUM_EXT_LEVEL2:
-		return &dsp_irq[core][0];
-	case IRQ_NUM_EXT_LEVEL3:
-		return &dsp_irq[core][1];
-	case IRQ_NUM_EXT_LEVEL4:
-		return &dsp_irq[core][2];
-	case IRQ_NUM_EXT_LEVEL5:
-		return &dsp_irq[core][3];
-	default:
-		return NULL;
-	}
-}
 
 uint32_t platform_interrupt_get_enabled(void)
 {
 	return 0;
 }
 
-void platform_interrupt_mask(uint32_t irq, uint32_t mask)
+void interrupt_mask(uint32_t irq, unsigned int cpu)
 {
-	int core = SOF_IRQ_CPU(irq);
+	struct irq_cascade_desc *cascade = interrupt_get_parent(irq);
 
-	/* mask external interrupt bit */
-	switch (SOF_IRQ_NUMBER(irq)) {
-	case IRQ_NUM_EXT_LEVEL5:
-		irq_write(REG_IRQ_IL5MSD(core), 1 << SOF_IRQ_BIT(irq));
-		break;
-	case IRQ_NUM_EXT_LEVEL4:
-		irq_write(REG_IRQ_IL4MSD(core), 1 << SOF_IRQ_BIT(irq));
-		break;
-	case IRQ_NUM_EXT_LEVEL3:
-		irq_write(REG_IRQ_IL3MSD(core), 1 << SOF_IRQ_BIT(irq));
-		break;
-	case IRQ_NUM_EXT_LEVEL2:
-		irq_write(REG_IRQ_IL2MSD(core), 1 << SOF_IRQ_BIT(irq));
-		break;
-	default:
-		break;
-	}
+	if (cascade && cascade->ops->mask)
+		cascade->ops->mask(&cascade->desc, irq - cascade->irq_base,
+				   cpu);
+
+	platform_shared_commit(cascade, sizeof(*cascade));
 }
 
-void platform_interrupt_unmask(uint32_t irq, uint32_t mask)
+void interrupt_unmask(uint32_t irq, unsigned int cpu)
 {
-	int core = SOF_IRQ_CPU(irq);
+	struct irq_cascade_desc *cascade = interrupt_get_parent(irq);
 
-	/* unmask external interrupt bit */
-	switch (SOF_IRQ_NUMBER(irq)) {
+	if (cascade && cascade->ops->unmask)
+		cascade->ops->unmask(&cascade->desc, irq - cascade->irq_base,
+				     cpu);
+
+	platform_shared_commit(cascade, sizeof(*cascade));
+}
+
+static void irq_mask(struct irq_desc *desc, uint32_t irq, unsigned int core)
+{
+	/* mask external interrupt bit */
+	switch (desc->irq) {
+#if CONFIG_INTERRUPT_LEVEL_5
 	case IRQ_NUM_EXT_LEVEL5:
-		irq_write(REG_IRQ_IL5MCD(core), 1 << SOF_IRQ_BIT(irq));
+		irq_write(REG_IRQ_IL5MSD(core), 1 << irq);
 		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_4
 	case IRQ_NUM_EXT_LEVEL4:
-		irq_write(REG_IRQ_IL4MCD(core), 1 << SOF_IRQ_BIT(irq));
+		irq_write(REG_IRQ_IL4MSD(core), 1 << irq);
 		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_3
 	case IRQ_NUM_EXT_LEVEL3:
-		irq_write(REG_IRQ_IL3MCD(core), 1 << SOF_IRQ_BIT(irq));
+		irq_write(REG_IRQ_IL3MSD(core), 1 << irq);
 		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_2
 	case IRQ_NUM_EXT_LEVEL2:
-		irq_write(REG_IRQ_IL2MCD(core), 1 << SOF_IRQ_BIT(irq));
+		irq_write(REG_IRQ_IL2MSD(core), 1 << irq);
 		break;
-	default:
-		break;
+#endif
 	}
+
+	platform_shared_commit(desc, sizeof(*desc));
+}
+
+static void irq_unmask(struct irq_desc *desc, uint32_t irq, unsigned int core)
+{
+	/* unmask external interrupt bit */
+	switch (desc->irq) {
+#if CONFIG_INTERRUPT_LEVEL_5
+	case IRQ_NUM_EXT_LEVEL5:
+		irq_write(REG_IRQ_IL5MCD(core), 1 << irq);
+		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_4
+	case IRQ_NUM_EXT_LEVEL4:
+		irq_write(REG_IRQ_IL4MCD(core), 1 << irq);
+		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_3
+	case IRQ_NUM_EXT_LEVEL3:
+		irq_write(REG_IRQ_IL3MCD(core), 1 << irq);
+		break;
+#endif
+#if CONFIG_INTERRUPT_LEVEL_2
+	case IRQ_NUM_EXT_LEVEL2:
+		irq_write(REG_IRQ_IL2MCD(core), 1 << irq);
+		break;
+#endif
+	}
+
+	platform_shared_commit(desc, sizeof(*desc));
+}
+
+static const struct irq_cascade_ops irq_ops = {
+	.mask = irq_mask,
+	.unmask = irq_unmask,
+};
+
+/* DSP internal interrupts */
+static const struct irq_cascade_tmpl dsp_irq[] = {
+#if CONFIG_INTERRUPT_LEVEL_2
+	{
+		.name = irq_name_level2,
+		.irq = IRQ_NUM_EXT_LEVEL2,
+		.handler = irq_lvl2_level2_handler,
+		.ops = &irq_ops,
+		.global_mask = false,
+	},
+#endif
+#if CONFIG_INTERRUPT_LEVEL_3
+	{
+		.name = irq_name_level3,
+		.irq = IRQ_NUM_EXT_LEVEL3,
+		.handler = irq_lvl2_level3_handler,
+		.ops = &irq_ops,
+		.global_mask = false,
+	},
+#endif
+#if CONFIG_INTERRUPT_LEVEL_4
+	{
+		.name = irq_name_level4,
+		.irq = IRQ_NUM_EXT_LEVEL4,
+		.handler = irq_lvl2_level4_handler,
+		.ops = &irq_ops,
+		.global_mask = false,
+	},
+#endif
+#if CONFIG_INTERRUPT_LEVEL_5
+	{
+		.name = irq_name_level5,
+		.irq = IRQ_NUM_EXT_LEVEL5,
+		.handler = irq_lvl2_level5_handler,
+		.ops = &irq_ops,
+		.global_mask = false,
+	},
+#endif
+};
+
+void platform_interrupt_set(uint32_t irq)
+{
+	if (interrupt_is_dsp_direct(irq))
+		arch_interrupt_set(irq);
 }
 
 void platform_interrupt_clear(uint32_t irq, uint32_t mask)
 {
+	if (interrupt_is_dsp_direct(irq))
+		arch_interrupt_clear(irq);
 }
 
+/* Called on each core: from platform_init() and from slave_core_init() */
 void platform_interrupt_init(void)
 {
-	int i, j;
+	int i;
 	int core = cpu_get_id();
 
 	/* mask all external IRQs by default */
@@ -226,9 +308,9 @@ void platform_interrupt_init(void)
 	irq_write(REG_IRQ_IL4MSD(core), REG_IRQ_IL4MD_ALL);
 	irq_write(REG_IRQ_IL5MSD(core), REG_IRQ_IL5MD_ALL);
 
-	for (i = 0; i < ARRAY_SIZE(dsp_irq[core]); i++) {
-		spinlock_init(&dsp_irq[core][i].lock);
-		for (j = 0; j < PLATFORM_IRQ_CHILDREN; j++)
-			list_init(&dsp_irq[core][i].child[j]);
-	}
+	if (core != PLATFORM_MASTER_CORE_ID)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(dsp_irq); i++)
+		interrupt_cascade_register(dsp_irq + i);
 }

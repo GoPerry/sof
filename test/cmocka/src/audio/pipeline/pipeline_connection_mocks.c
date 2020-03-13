@@ -6,6 +6,12 @@
 
 #include "pipeline_connection_mocks.h"
 
+extern struct schedulers *schedulers;
+
+struct scheduler_ops schedule_mock_ops = {
+	.schedule_task_free	= &schedule_task_mock_free,
+};
+
 void cleanup_test_data(struct pipeline_connect_data *data)
 {
 	list_init(&data->first->bsource_list);
@@ -32,19 +38,34 @@ struct pipeline_connect_data *get_standard_connect_objects(void)
 	pipe->ipc_pipe = pipe_desc;
 	pipe->status = COMP_STATE_INIT;
 
-	struct comp_dev *first = calloc(sizeof(struct comp_dev), 1);
+	pipe->pipe_task = calloc(sizeof(struct task), 1);
+	pipe->pipe_task->type = SOF_SCHEDULE_EDF;
 
-	first->comp.id = 3;
-	first->comp.pipeline_id = PIPELINE_ID_SAME;
+	schedulers = calloc(sizeof(struct schedulers), 1);
+	list_init(&schedulers->list);
+
+	struct schedule_data *sch = calloc(sizeof(struct schedule_data), 1);
+
+	list_init(&sch->list);
+	sch->type = SOF_SCHEDULE_EDF;
+	sch->ops = &schedule_mock_ops;
+	list_item_append(&sch->list, &schedulers->list);
+
+	struct comp_dev *first = calloc(sizeof(struct comp_dev), 1);
+	struct sof_ipc_comp *first_comp = dev_comp(first);
+
+	first_comp->id = 3;
+	first_comp->pipeline_id = PIPELINE_ID_SAME;
 	list_init(&first->bsink_list);
 	list_init(&first->bsource_list);
 	pipeline_connect_data->first = first;
 	pipe->sched_comp = first;
 
 	struct comp_dev *second = calloc(sizeof(struct comp_dev), 1);
+	struct sof_ipc_comp *second_comp = dev_comp(second);
 
-	second->comp.id = 4;
-	second->comp.pipeline_id = PIPELINE_ID_DIFFERENT;
+	second_comp->id = 4;
+	second_comp->pipeline_id = PIPELINE_ID_DIFFERENT;
 	list_init(&second->bsink_list);
 	list_init(&second->bsource_list);
 	pipeline_connect_data->second = second;

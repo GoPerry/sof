@@ -5,12 +5,12 @@
 // Author: Seppo Ingalsuo <seppo.ingalsuo@linux.intel.com>
 //         Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
 
-#include <sof/ipc.h>
+#include <sof/drivers/ipc.h>
 #include <sof/list.h>
 #include <getopt.h>
 #include <dlfcn.h>
 #include "testbench/common_test.h"
-#include "testbench/topology.h"
+#include <tplg_parser/topology.h>
 #include "testbench/trace.h"
 #include "testbench/file.h"
 
@@ -21,16 +21,19 @@ struct shared_lib_table lib_table[NUM_WIDGETS_SUPPORTED] = {
 	{"file", "", SND_SOC_TPLG_DAPM_AIF_IN, 0, NULL},
 	{"vol", "libsof_volume.so", SND_SOC_TPLG_DAPM_PGA, 0, NULL},
 	{"src", "libsof_src.so", SND_SOC_TPLG_DAPM_SRC, 0, NULL},
+	{"asrc", "libsof_asrc.so", SND_SOC_TPLG_DAPM_ASRC, 0, NULL},
 };
 
 /* main firmware context */
 static struct sof sof;
-static int fr_id; /* comp id for fileread */
-static int fw_id; /* comp id for filewrite */
-static int sched_id; /* comp id for scheduling comp */
 
 /* compatible variables, not used */
 intptr_t _comp_init_start, _comp_init_end;
+
+struct sof *sof_get()
+{
+	return &sof;
+}
 
 /*
  * Parse shared library from user input
@@ -95,7 +98,7 @@ static void free_comps(void)
 	struct list_item *temp;
 	struct ipc_comp_dev *icd = NULL;
 
-	list_for_item_safe(clist, temp, &sof.ipc->shared_ctx->comp_list) {
+	list_for_item_safe(clist, temp, &sof.ipc->comp_list) {
 		icd = container_of(clist, struct ipc_comp_dev, list);
 		switch (icd->type) {
 		case COMP_TYPE_COMPONENT:
@@ -104,7 +107,7 @@ static void free_comps(void)
 			rfree(icd);
 			break;
 		case COMP_TYPE_BUFFER:
-			rfree(icd->cb->addr);
+			rfree(icd->cb->stream.addr);
 			rfree(icd->cb);
 			list_item_del(&icd->list);
 			rfree(icd);
@@ -142,6 +145,7 @@ static void parse_input_args(int argc, char **argv, struct testbench_prm *tp)
 		/* input samples bit format */
 		case 'b':
 			tp->bits_in = strdup(optarg);
+			tp->frame_fmt = find_format(tp->bits_in);
 			break;
 
 		/* override default libraries */
@@ -187,9 +191,13 @@ int main(int argc, char **argv)
 	int n_in, n_out, ret;
 	int i;
 
-	/* initialize input and output sample rates */
+	/* initialize input and output sample rates, files, etc. */
 	tp.fs_in = 0;
 	tp.fs_out = 0;
+	tp.bits_in = 0;
+	tp.input_file = NULL;
+	tp.output_file = NULL;
+	tp.channels = TESTBENCH_NCH;
 
 	/* command line arguments*/
 	parse_input_args(argc, argv, &tp);
@@ -207,20 +215,19 @@ int main(int argc, char **argv)
 	}
 
 	/* parse topology file and create pipeline */
-	if (parse_topology(&sof, lib_table, &tp, &fr_id, &fw_id, &sched_id,
-			   pipeline) < 0) {
+	if (parse_topology(&sof, lib_table, &tp, pipeline) < 0) {
 		fprintf(stderr, "error: parsing topology\n");
 		exit(EXIT_FAILURE);
 	}
 
 	/* Get pointers to fileread and filewrite */
-	pcm_dev = ipc_get_comp(sof.ipc, fw_id);
+	pcm_dev = ipc_get_comp_by_id(sof.ipc, tp.fw_id);
 	fwcd = comp_get_drvdata(pcm_dev->cd);
-	pcm_dev = ipc_get_comp(sof.ipc, fr_id);
+	pcm_dev = ipc_get_comp_by_id(sof.ipc, tp.fr_id);
 	frcd = comp_get_drvdata(pcm_dev->cd);
 
 	/* Run pipeline until EOF from fileread */
-	pcm_dev = ipc_get_comp(sof.ipc, sched_id);
+	pcm_dev = ipc_get_comp_by_id(sof.ipc, tp.sched_id);
 	p = pcm_dev->cd->pipeline;
 	ipc_pipe = &p->ipc_pipe;
 
@@ -232,7 +239,7 @@ int main(int argc, char **argv)
 		tp.fs_out = ipc_pipe->period * ipc_pipe->frames_per_sched;
 
 	/* set pipeline params and trigger start */
-	if (tb_pipeline_start(sof.ipc, TESTBENCH_NCH, ipc_pipe, &tp) < 0) {
+	if (tb_pipeline_start(sof.ipc, ipc_pipe, &tp) < 0) {
 		fprintf(stderr, "error: pipeline params\n");
 		exit(EXIT_FAILURE);
 	}
@@ -250,6 +257,7 @@ int main(int argc, char **argv)
 	/* reset and free pipeline */
 	toc = clock();
 	tb_enable_trace(true);
+	pipeline_trigger(p, cd, COMP_TRIGGER_STOP);
 	ret = pipeline_reset(p, cd);
 	if (ret < 0) {
 		fprintf(stderr, "error: pipeline reset\n");

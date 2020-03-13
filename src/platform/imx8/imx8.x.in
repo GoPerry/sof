@@ -7,7 +7,8 @@
  * Use spaces for formatting as cpp ignore tab sizes.
  */
 
-#include <platform/memory.h>
+#include <config.h>
+#include <sof/lib/memory.h>
 #include <xtensa/config/core-isa.h>
 
 OUTPUT_ARCH(xtensa)
@@ -89,6 +90,9 @@ MEMORY
   sof_sdram1 :
         org = SDRAM1_BASE,
         len = SDRAM1_SIZE
+  static_uuid_entries_seg (!ari) :
+        org = UUID_ENTRY_ELF_BASE,
+        len = UUID_ENTRY_ELF_SIZE
   static_log_entries_seg (!ari) :
         org = LOG_ENTRY_ELF_BASE,
         len = LOG_ENTRY_ELF_SIZE
@@ -121,6 +125,7 @@ PHDRS
   runtime_heap_phdr PT_LOAD;
   buffer_heap_phdr PT_LOAD;
   sof_stack_phdr PT_LOAD;
+  static_uuid_entries_phdr PT_NOTE;
   static_log_entries_phdr PT_NOTE;
 }
 
@@ -147,7 +152,8 @@ _memmap_cacheattr_bp_strict = 0x22F22FFF;
 _memmap_cacheattr_wb_allvalid = 0x44224222;
 _memmap_cacheattr_wt_allvalid = 0x11221222;
 _memmap_cacheattr_bp_allvalid = 0x22222222;
-PROVIDE(_memmap_cacheattr_reset = _memmap_cacheattr_wbna_trapnull);
+_memmap_cacheattr_imx8_wt_allvalid = 0x22212222;
+PROVIDE(_memmap_cacheattr_reset = _memmap_cacheattr_imx8_wt_allvalid);
 
 SECTIONS
 {
@@ -461,7 +467,7 @@ SECTIONS
 
   .system_runtime_heap (NOLOAD) : ALIGN(8)
   {
-    . = ALIGN (32);
+    . = ALIGN (HEAP_BUF_ALIGNMENT);
     _system_runtime_heap_start = ABSOLUTE(.);
     . = . + HEAP_SYS_RUNTIME_SIZE;
     _system_runtime_heap_end = ABSOLUTE(.);
@@ -477,7 +483,7 @@ SECTIONS
 
   .buffer_heap (NOLOAD) : ALIGN(8)
   {
-    . = ALIGN (32);
+    . = ALIGN (HEAP_BUF_ALIGNMENT);
     _buffer_heap_start = ABSOLUTE(.);
     . = . + HEAP_BUFFER_SIZE;
     _buffer_heap_end = ABSOLUTE(.);
@@ -491,6 +497,11 @@ SECTIONS
     _sof_stack_end = ABSOLUTE(.);
   } >sof_stack :sof_stack_phdr
 
+  .static_uuid_entries (COPY) : ALIGN(1024)
+  {
+    *(*.static_uuids)
+  } > static_uuid_entries_seg :static_uuid_entries_phdr
+
   .static_log_entries (COPY) : ALIGN(1024)
   {
     *(*.static_log*)
@@ -499,5 +510,6 @@ SECTIONS
   .fw_ready : ALIGN(4)
   {
     KEEP (*(.fw_ready))
+    KEEP (*(.fw_ready_metadata))
   } >sof_sdram0 :sof_sdram0_phdr
 }

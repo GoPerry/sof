@@ -7,17 +7,22 @@
  *         Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef FIR_H
-#define FIR_H
+#ifndef __SOF_AUDIO_EQ_FIR_FIR_H__
+#define __SOF_AUDIO_EQ_FIR_FIR_H__
 
 #include <sof/audio/eq_fir/fir_config.h>
 
 #if FIR_GENERIC
 
 #include <sof/audio/format.h>
+#include <stdint.h>
+
+struct comp_buffer;
+struct sof_eq_fir_coef_data;
 
 struct fir_state_32x16 {
 	int rwi; /* Circular read and write index */
+	int taps; /* Number of FIR taps */
 	int length; /* Number of FIR taps */
 	int out_shift; /* Amount of right shifts at output */
 	int16_t *coef; /* Pointer to FIR coefficients */
@@ -26,79 +31,85 @@ struct fir_state_32x16 {
 
 void fir_reset(struct fir_state_32x16 *fir);
 
-size_t fir_init_coef(struct fir_state_32x16 *fir,
-		     struct sof_eq_fir_coef_data *config);
+int fir_delay_size(struct sof_eq_fir_coef_data *config);
+
+int fir_init_coef(struct fir_state_32x16 *fir,
+		  struct sof_eq_fir_coef_data *config);
 
 void fir_init_delay(struct fir_state_32x16 *fir, int32_t **data);
 
-void eq_fir_s16(struct fir_state_32x16 *fir, struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch);
+#if CONFIG_FORMAT_S16LE
+void eq_fir_s16(struct fir_state_32x16 *fir, const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch);
+#endif /* CONFIG_FORMAT_S16LE */
 
-void eq_fir_s24(struct fir_state_32x16 *fir, struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch);
+#if CONFIG_FORMAT_S24LE
+void eq_fir_s24(struct fir_state_32x16 *fir, const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch);
+#endif /* CONFIG_FORMAT_S24LE */
 
-void eq_fir_s32(struct fir_state_32x16 *fir, struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch);
+#if CONFIG_FORMAT_S32LE
+void eq_fir_s32(struct fir_state_32x16 *fir, const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch);
+#endif /* CONFIG_FORMAT_S32LE */
 
 /* The next functions are inlined to optmize execution speed */
-
-static inline void fir_part_32x16(int64_t *y, int taps, const int16_t c[],
-				  int *ic, int32_t d[], int *id)
-{
-	int n;
-
-	/* Data is Q8.24, coef is Q1.15, product is Q9.39 */
-	for (n = 0; n < taps; n++) {
-		*y += (int64_t)c[*ic] * d[*id];
-		(*ic)++;
-		(*id)--;
-	}
-}
 
 static inline int32_t fir_32x16(struct fir_state_32x16 *fir, int32_t x)
 {
 	int64_t y = 0;
+	int32_t *data = &fir->delay[fir->rwi];
+	int16_t *coef = &fir->coef[0];
 	int n1;
 	int n2;
-	int i = 0; /* Start from 1st tap */
-	int tmp_ri;
+	int n;
 
 	/* Bypass is set with length set to zero. */
 	if (!fir->length)
 		return x;
 
 	/* Write sample to delay */
-	fir->delay[fir->rwi] = x;
+	*data = x;
 
-	/* Start FIR calculation. Calculate first number of taps possible to
-	 * calculate before circular wrap need.
+	/* Advance write pointer and calculate into n1 max. number of taps
+	 * to process before circular wrap.
 	 */
-	n1 = fir->rwi + 1;
-	/* Point to newest sample and advance read index */
-	tmp_ri = (fir->rwi)++;
+	n1 = ++fir->rwi;
 	if (fir->rwi == fir->length)
 		fir->rwi = 0;
 
+	/* Check if no need to un-wrap FIR data. */
 	if (n1 > fir->length) {
-		/* No need to un-wrap fir read index, make sure ri
-		 * is >= 0 after FIR computation.
-		 */
-		fir_part_32x16(&y, fir->length, fir->coef, &i, fir->delay,
-			       &tmp_ri);
-	} else {
-		n2 = fir->length - n1;
-		/* Part 1, loop n1 times, fir_ri becomes -1 */
-		fir_part_32x16(&y, n1, fir->coef, &i, fir->delay, &tmp_ri);
+		/* Data is Q1.31, coef is Q1.15, product is Q2.46 */
+		for (n = 0; n < fir->length; n++) {
+			y += (int64_t)(*coef) * (*data);
+			coef++;
+			data--;
+		}
 
-		/* Part 2, unwrap fir_ri, continue rest of filter */
-		tmp_ri = fir->length - 1;
-		fir_part_32x16(&y, n2, fir->coef, &i, fir->delay, &tmp_ri);
+		/* Q2.46 -> Q2.31, saturate to Q1.31 */
+		return sat_int32(y >> (15 + fir->out_shift));
 	}
-	/* Q9.39 -> Q9.24, saturate to Q8.24 */
-	y = sat_int32(y >> (15 + fir->out_shift));
 
-	return (int32_t)y;
+	/* Part 1, loop n1 times */
+	for (n = 0; n < n1; n++) {
+		y += (int64_t)(*coef) * (*data);
+		coef++;
+		data--;
+	}
+
+	/* Part 2, un-wrap data, continue n2 times */
+	n2 = fir->length - n1;
+	data = &fir->delay[fir->length - 1];
+	for (n = 0; n < n2; n++) {
+		y += (int64_t)(*coef) * (*data);
+		coef++;
+		data--;
+	}
+
+	/* Q2.46 -> Q2.31, saturate to Q1.31 */
+	return sat_int32(y >> (15 + fir->out_shift));
 }
 
 #endif
-#endif
+#endif /* __SOF_AUDIO_EQ_FIR_FIR_H__ */

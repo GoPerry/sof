@@ -4,16 +4,26 @@
 
 menu "Xtensa Architecture"
 
-config SMP
-	bool "SMP build"
-	default n
-	help
-	  Build SMP instead of UP
-
 config CORE_COUNT
 	int "Number of cores"
 	default 1
 	help
 	  Number of used cores
 	  Lowering available core count could result in lower power consumption
+
+config SMP
+	bool
+	default CORE_COUNT > 1
+	help
+	  Indicates that architecture uses multiple cores
+
+config WAKEUP_HOOK
+	bool
+	default n
+	help
+	  Enables hook that is called and after coming back from WAITI.
+	  This config should be selected by other platform-level configs.
+	  Platforms that use it, have to implement hook function
+	  platform_interrupt_on_wakeup.
+
 endmenu

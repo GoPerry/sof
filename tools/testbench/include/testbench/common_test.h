@@ -18,7 +18,7 @@
 #define MAX_LIB_NAME_LEN	256
 
 /* number of widgets types supported in testbench */
-#define NUM_WIDGETS_SUPPORTED	3
+#define NUM_WIDGETS_SUPPORTED	4
 
 struct testbench_prm {
 	char *tplg_file; /* topology file to use */
@@ -33,6 +33,11 @@ struct testbench_prm {
 	 */
 	uint32_t fs_in;
 	uint32_t fs_out;
+	uint32_t channels;
+	int fr_id;
+	int fw_id;
+	int sched_id;
+	enum sof_ipc_frame frame_fmt;
 };
 
 struct shared_lib_table {
@@ -53,12 +58,10 @@ void sys_comp_filewrite_init(void);
 
 int tb_pipeline_setup(struct sof *sof);
 
-int tb_pipeline_start(struct ipc *ipc, int nch,
-		      struct sof_ipc_pipe_new *ipc_pipe,
+int tb_pipeline_start(struct ipc *ipc, struct sof_ipc_pipe_new *ipc_pipe,
 		      struct testbench_prm *tp);
 
-int tb_pipeline_params(struct ipc *ipc, int nch,
-		       struct sof_ipc_pipe_new *ipc_pipe,
+int tb_pipeline_params(struct ipc *ipc, struct sof_ipc_pipe_new *ipc_pipe,
 		       struct testbench_prm *tp);
 
 void debug_print(char *message);
@@ -68,4 +71,7 @@ int get_index_by_name(char *comp_name,
 
 int get_index_by_type(uint32_t comp_type,
 		      struct shared_lib_table *lib_table);
+
+int parse_topology(struct sof *sof, struct shared_lib_table *library_table,
+		   struct testbench_prm *tp, char *pipeline_msg);
 #endif

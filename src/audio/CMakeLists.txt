@@ -7,6 +7,7 @@ if(NOT BUILD_LIBRARY)
 		pipeline_static.c
 		component.c
 		buffer.c
+		channel_map.c
 	)
 	if(CONFIG_COMP_VOLUME)
 		add_subdirectory(volume)
@@ -56,6 +57,10 @@ if(NOT BUILD_LIBRARY)
 			detect_test.c
 		)
 	endif()
+	add_subdirectory(pcm_converter)
+	if(CONFIG_COMP_ASRC)
+		add_subdirectory(asrc)
+	endif()
 	return()
 endif()
 
@@ -74,6 +79,7 @@ function(sof_audio_add_module lib_name compile_flags)
 	target_link_libraries(${lib_name} PRIVATE -Wl,--export-dynamic)
 	target_compile_options(${lib_name} PRIVATE ${compile_flags})
 	add_local_sources(${lib_name} ${ARGN})
+	sof_append_relative_path_definitions(${lib_name})
 	install(TARGETS ${lib_name} DESTINATION lib)
 endfunction()
 
@@ -98,11 +104,12 @@ check_optimization(fma -mfma -DOPS_FMA)
 check_optimization(hifi2ep -mhifi2ep -DOPS_HIFI2EP)
 check_optimization(hifi3 -mhifi3 -DOPS_HIFI3)
 
-set(sof_audio_modules volume src)
+set(sof_audio_modules volume src asrc)
 
 # sources for each module
 set(volume_sources volume/volume.c volume/volume_generic.c)
 set(src_sources src/src.c src/src_generic.c)
+set(asrc_sources asrc/asrc.c asrc/asrc_farrow.c asrc/asrc_farrow_generic.c)
 
 foreach(audio_module ${sof_audio_modules})
 	# first compile with no optimizations

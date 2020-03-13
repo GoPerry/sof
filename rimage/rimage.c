@@ -21,10 +21,14 @@ static const struct adsp *machine[] = {
 	&machine_apl,
 	&machine_cnl,
 	&machine_icl,
+	&machine_jsl,
+	&machine_tgl,
 	&machine_sue,
 	&machine_kbl,
 	&machine_skl,
 	&machine_imx8,
+	&machine_imx8x,
+	&machine_imx8m,
 };
 
 static void usage(char *name)
@@ -36,6 +40,7 @@ static void usage(char *name)
 	fprintf(stdout, "\t -s MEU signing offset\n");
 	fprintf(stdout, "\t -p log dictionary outfile\n");
 	fprintf(stdout, "\t -i set IMR type\n");
+	fprintf(stdout, "\t -x set xcc module offset\n");
 	exit(0);
 }
 
@@ -48,7 +53,9 @@ int main(int argc, char *argv[])
 
 	memset(&image, 0, sizeof(image));
 
-	while ((opt = getopt(argc, argv, "ho:p:m:vba:s:k:l:ri:")) != -1) {
+	image.xcc_mod_offset = DEFAULT_XCC_MOD_OFFSET;
+
+	while ((opt = getopt(argc, argv, "ho:p:m:vba:s:k:l:ri:x:")) != -1) {
 		switch (opt) {
 		case 'o':
 			image.out_file = optarg;
@@ -76,6 +83,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'i':
 			imr_type = atoi(optarg);
+			break;
+		case 'x':
+			image.xcc_mod_offset = atoi(optarg);
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -115,6 +125,9 @@ found:
 	if (image.adsp->man_v1_8)
 		image.adsp->man_v1_8->adsp_file_ext.imr_type = imr_type;
 
+	if (image.adsp->man_v2_5)
+		image.adsp->man_v2_5->adsp_file_ext.imr_type = imr_type;
+
 	/* parse input ELF files */
 	image.num_modules = argc - elf_argc;
 	for (i = elf_argc; i < argc; i++) {
@@ -153,7 +166,7 @@ found:
 		ret = -EINVAL;
 		goto out;
 	}
-	ret = write_logs_dictionary(&image);
+	ret = write_dictionaries(&image);
 out:
 	/* close files */
 	if (image.out_fd)

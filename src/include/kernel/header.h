@@ -13,8 +13,10 @@
  * \author Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_USER_HEADER_H__
-#define __INCLUDE_UAPI_USER_HEADER_H__
+#ifndef __KERNEL_HEADER_H__
+#define __KERNEL_HEADER_H__
+
+#include <stdint.h>
 
 /**
  * \brief Header for all non IPC ABI data.
@@ -34,4 +36,4 @@ struct sof_abi_hdr {
 	uint32_t data[0];	/**< Component data - opaque to core */
 } __attribute__((packed));
 
-#endif
+#endif /* __KERNEL_HEADER_H__ */

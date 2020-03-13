@@ -7,8 +7,8 @@
  *         Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef NUMBERS_H
-#define NUMBERS_H
+#ifndef __SOF_MATH_NUMBERS_H__
+#define __SOF_MATH_NUMBERS_H__
 
 #include <stdint.h>
 
@@ -25,6 +25,11 @@
 #define ABS(a) ({		\
 	typeof(a) __a = (a);	\
 	__a < 0 ? -__a : __a;	\
+})
+#define SGN(a) ({		\
+	typeof(a) __a = (a);	\
+	__a < 0 ? -1 :		\
+	__a > 0 ? 1 : 0;	\
 })
 
 int gcd(int a, int b); /* Calculate greatest common divisor for a and b */
@@ -66,7 +71,7 @@ int32_t find_max_abs_int32(int32_t vec[], int vec_length);
  */
 int norm_int32(int32_t val);
 
-uint32_t crc32(const void *data, uint32_t bytes);
+uint32_t crc32(uint32_t base, const void *data, uint32_t bytes);
 
 /* merges two 16-bit values into a single 32-bit value */
 #define merge_16b16b(high, low) (((uint32_t)(high) << 16) | \
@@ -76,4 +81,4 @@ uint32_t crc32(const void *data, uint32_t bytes);
 #define merge_4b4b(high, low) (((uint8_t)(high) << 4) | \
 			       ((low) & 0xF))
 
-#endif /* NUMBERS_H */
+#endif /* __SOF_MATH_NUMBERS_H__ */

@@ -5,20 +5,14 @@
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
-#include <stdint.h>
-#include <stddef.h>
+#include <sof/drivers/ipc.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/dma.h>
+#include <sof/platform.h>
+#include <ipc/stream.h>
+#include <ipc/topology.h>
 #include <errno.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/alloc.h>
-#include <sof/ipc.h>
-#include <sof/debug.h>
-#include <platform/platform.h>
-#include <sof/audio/component.h>
-#include <sof/audio/pipeline.h>
-#include <sof/audio/buffer.h>
+#include <stdint.h>
 
 /*
  * Parse the host page tables and create the audio DMA SG configuration
@@ -47,10 +41,15 @@ static int ipc_parse_page_descriptors(uint8_t *page_table,
 		return -EINVAL;
 	}
 
-	elem_array->elems = rzalloc(RZONE_RUNTIME, SOF_MEM_CAPS_RAM,
+	elem_array->elems = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
 				    sizeof(struct dma_sg_elem) * ring->pages);
-	if (!elem_array->elems)
+	if (!elem_array->elems) {
+		trace_ipc_error("ipc_parse_page_descriptors() error: "
+		"There is no heap free with this block size: %d",
+		sizeof(struct dma_sg_elem) * ring->pages);
 		return -ENOMEM;
+	}
+
 	elem_array->count = ring->pages;
 
 	for (i = 0; i < ring->pages; i++) {
@@ -81,14 +80,6 @@ static int ipc_parse_page_descriptors(uint8_t *page_table,
 	return 0;
 }
 
-static void dma_complete(void *data, uint32_t type, struct dma_cb_data *next)
-{
-	completion_t *complete = data;
-
-	if (type == DMA_CB_TYPE_IRQ)
-		wait_completed(complete);
-}
-
 /*
  * Copy the audio buffer page tables from the host to the DSP max of 4K.
  */
@@ -97,15 +88,15 @@ static int ipc_get_page_descriptors(struct dma *dmac, uint8_t *page_table,
 {
 	struct dma_sg_config config;
 	struct dma_sg_elem elem;
-	completion_t complete;
-	int chan;
+	struct dma_chan_data *chan;
 	int ret = 0;
 
 	/* get DMA channel from DMAC */
 	chan = dma_channel_get(dmac, 0);
-	if (chan < 0) {
-		trace_ipc_error("ipc_get_page_descriptors() error: chan < 0");
-		return chan;
+	if (!chan) {
+		trace_ipc_error("ipc_get_page_descriptors() error: chan is "
+				"NULL");
+		return -ENODEV;
 	}
 
 	/* set up DMA configuration */
@@ -126,35 +117,24 @@ static int ipc_get_page_descriptors(struct dma *dmac, uint8_t *page_table,
 	config.elem_array.elems = &elem;
 	config.elem_array.count = 1;
 
-	ret = dma_set_config(dmac, chan, &config);
+	ret = dma_set_config(chan, &config);
 	if (ret < 0) {
 		trace_ipc_error("ipc_get_page_descriptors() error: "
 				"dma_set_config() failed");
 		goto out;
 	}
 
-	/* set up callback */
-	dma_set_cb(dmac, chan, DMA_CB_TYPE_IRQ, dma_complete, &complete);
-
-	wait_init(&complete);
-
 	/* start the copy of page table to DSP */
-	ret = dma_start(dmac, chan);
+	ret = dma_copy(chan, elem.size, DMA_COPY_ONE_SHOT | DMA_COPY_BLOCKING);
 	if (ret < 0) {
 		trace_ipc_error("ipc_get_page_descriptors() error: "
 				"dma_start() failed");
 		goto out;
 	}
 
-	/* wait for DMA to complete */
-	ret = poll_for_completion_delay(&complete, PLATFORM_DMA_TIMEOUT);
-	if (ret < 0)
-		trace_ipc_error("ipc_get_page_descriptors() error: "
-				"poll_for_completion_delay() failed");
-
 	/* compressed page tables now in buffer at _ipc->page_table */
 out:
-	dma_channel_put(dmac, chan);
+	dma_channel_put(chan);
 	return ret;
 }
 
@@ -192,5 +172,5 @@ int ipc_process_host_buffer(struct ipc *ipc,
 	return 0;
 error:
 	dma_sg_free(elem_array);
-	return -EINVAL;
+	return err;
 }

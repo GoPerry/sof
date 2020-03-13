@@ -13,11 +13,13 @@
  * \author Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_IPC_CONTROL_H__
-#define __INCLUDE_UAPI_IPC_CONTROL_H__
+#ifndef __IPC_CONTROL_H__
+#define __IPC_CONTROL_H__
 
-#include <kernel/header.h>
 #include <ipc/header.h>
+#include <ipc/stream.h>
+#include <kernel/header.h>
+#include <stdint.h>
 
 /** \addtogroup sof_uapi_control uAPI Control
  *  SOF uAPI specification - component controls.
@@ -165,7 +167,7 @@ struct sof_ipc_comp_event {
 
 	/* reserved for future use */
 	uint32_t reserved[8];
-	
+
 	/* control data - add new types if needed */
 	union {
 		/* data can be used by binary controls */
@@ -179,4 +181,4 @@ struct sof_ipc_comp_event {
 
 /** @}*/
 
-#endif
+#endif /* __IPC_CONTROL_H__ */

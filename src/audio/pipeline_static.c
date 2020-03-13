@@ -10,17 +10,15 @@
  * definition if no pipeline is specified by driver topology.
  */
 
-#include <stdint.h>
-#include <stddef.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/dai.h>
-#include <sof/ipc.h>
-#include <platform/platform.h>
-#include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
+#include <sof/common.h>
+#include <sof/drivers/ipc.h>
+#include <sof/schedule/task.h>
+#include <sof/trace/trace.h>
+#include <ipc/dai.h>
+#include <ipc/stream.h>
+#include <ipc/topology.h>
+#include <stdint.h>
 
 /* 2 * 32 bit*/
 #define PLATFORM_INT_FRAME_SIZE		8
@@ -385,7 +383,8 @@ int init_static_pipeline(struct ipc *ipc)
 					goto error;
 
 				/* next component - sizes not constant */
-				c = (void *)c + c->hdr.size;
+				c = (struct sof_ipc_comp *)
+				     ((char *)c + c->hdr.size);
 			}
 		}
 
@@ -416,7 +415,7 @@ int init_static_pipeline(struct ipc *ipc)
 	return 0;
 
 error:
-	trace_pipe_error("init_static_pipeline() error");
+	pipe_cl_err("init_static_pipeline() error");
 
 	for (i = 0; i < ARRAY_SIZE(pipeline); i++) {
 

@@ -7,7 +7,9 @@
 //         Keyon Jie <yang.jie@linux.intel.com>
 //         Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
 
-#include <sof/ipc.h>
+#include <sof/lib/alloc.h>
+#include <sof/drivers/ipc.h>
+#include <stdlib.h>
 
 /* testbench ipc */
 struct ipc *_ipc;
@@ -16,6 +18,15 @@ struct ipc *_ipc;
 struct ipc_data {
 	struct ipc_data_host_buffer dh_buffer;
 };
+
+enum task_state ipc_platform_do_cmd(void *data)
+{
+	return SOF_TASK_STATE_COMPLETED;
+}
+
+void ipc_platform_complete_cmd(void *data)
+{
+}
 
 int platform_ipc_init(struct ipc *ipc)
 {
@@ -35,16 +46,8 @@ int platform_ipc_init(struct ipc *ipc)
 	return 0;
 }
 
-/* The following definitions are to satisfy libsof linker errors */
+/* The following definition is to satisfy libsof linker errors */
 
-int ipc_stream_send_position(struct comp_dev *cdev,
-			     struct sof_ipc_stream_posn *posn)
+void ipc_msg_send(struct ipc_msg *msg, void *data, bool high_priority)
 {
-	return 0;
-}
-
-int ipc_stream_send_xrun(struct comp_dev *cdev,
-			 struct sof_ipc_stream_posn *posn)
-{
-	return 0;
 }

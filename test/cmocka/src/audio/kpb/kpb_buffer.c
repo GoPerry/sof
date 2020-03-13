@@ -16,12 +16,15 @@
 #include <stddef.h>
 
 #include <sof/sof.h>
-#include <sof/trace.h>
+#include <sof/trace/trace.h>
 #include <sof/audio/kpb.h>
 #include <sof/audio/component.h>
 #include <sof/audio/buffer.h>
 #include "kpb_mock.h"
 #include <sof/list.h>
+#include <sof/lib/notifier.h>
+#include <sof/schedule/task.h>
+#include <user/kpb.h>
 
 /*! Local data types */
 
@@ -33,7 +36,6 @@ struct comp_data {
 	enum kpb_state state; /**< current state of KPB component */
 	uint32_t kpb_no_of_clients; /**< number of registered clients */
 	struct kpb_client clients[KPB_MAX_NO_OF_CLIENTS];
-	struct notifier kpb_events; /**< KPB events object */
 	struct task draining_task;
 	uint32_t source_period_bytes; /**< source number of period bytes */
 	uint32_t sink_period_bytes; /**< sink number of period bytes */
@@ -111,14 +113,15 @@ static int buffering_test_setup(void **state)
 	.size = sizeof(struct sof_kpb_config),
 	.no_channels = 2,
 	.sampling_freq = KPB_SAMPLNG_FREQUENCY,
-	.sampling_width = KPB_SAMPLING_WIDTH,
+	.sampling_width = KPB_SAMPLE_CONTAINER_SIZE(16),
 	};
 
 	/* Register KPB component to use its internal functions */
 	sys_comp_kpb_init();
 
 	/* Create KPB component */
-	kpb_dev_mock = kpb_drv_mock.ops.new((struct sof_ipc_comp *)&kpb);
+	kpb_dev_mock = kpb_drv_mock.ops.new(&kpb_drv_mock,
+					    (struct sof_ipc_comp *)&kpb);
 
 	/* Was device created properly?  */
 	assert_non_null(kpb_dev_mock);
@@ -135,7 +138,7 @@ static int buffering_test_setup(void **state)
 	sink = mock_comp_buffer(state, KPB_SINK_BUFFER);
 
 	/* Fiil source buffer with test data */
-	r_ptr = (unsigned char *)source->r_ptr;
+	r_ptr = (unsigned char *)source->stream.r_ptr;
 	for (i = 0; i < test_case_data->history_buffer_size; i++)
 		(*r_ptr++) = pattern;
 
@@ -159,16 +162,14 @@ static struct comp_buffer *mock_comp_buffer(void **state,
 
 	switch (buff_type) {
 	case KPB_SOURCE_BUFFER:
-		buffer->avail = test_case_data->period_bytes;
-		buffer->r_ptr = source_data;
+		buffer->stream.avail = test_case_data->period_bytes;
+		buffer->stream.r_ptr = source_data;
 		break;
 	case KPB_SINK_BUFFER:
-		buffer->free = test_case_data->period_bytes;
-		buffer->w_ptr = sink_data;
+		buffer->stream.free = test_case_data->period_bytes;
+		buffer->stream.w_ptr = sink_data;
 		break;
 	}
-
-	buffer->cb = NULL;
 
 	return buffer;
 }
@@ -183,14 +184,15 @@ static int buffering_test_teardown(void **state)
 }
 
 /* Mock comp_register here so we can register our components properly */
-int comp_register(struct comp_driver *drv)
+int comp_register(struct comp_driver_info *info)
 {
 	void *dst;
 
-	switch (drv->type) {
+	switch (info->drv->type) {
 	case SOF_COMP_KPB:
 		dst = &kpb_drv_mock;
-		memcpy(dst, drv, sizeof(struct comp_driver));
+		memcpy_s(dst, sizeof(kpb_drv_mock), info->drv,
+			 sizeof(struct comp_driver));
 		break;
 	default:
 		return -1;
@@ -253,7 +255,7 @@ static void null_test_success(void **state)
 /* Test main function */
 int main(void)
 {
-	struct CMUnitTest tests[2];
+	struct CMUnitTest tests[1];
 	struct test_case internal_buffering = {
 		.period_bytes = KPB_MAX_BUFFER_SIZE(16),
 		.history_buffer_size = KPB_MAX_BUFFER_SIZE(16),

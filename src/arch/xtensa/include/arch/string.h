@@ -5,11 +5,15 @@
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
 
-#ifndef __INCLUDE_ARCH_STRING_SOF__
-#define __INCLUDE_ARCH_STRING_SOF__
+#ifdef __SOF_STRING_H__
 
+#ifndef __ARCH_STRING_H__
+#define __ARCH_STRING_H__
+
+#include <config.h>
+#include <xtensa/hal.h>
 #include <errno.h>
-#include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 #define arch_memcpy(dest, src, size) \
@@ -32,7 +36,7 @@ int memset_s(void *dest, size_t dest_size,
 int memcpy_s(void *dest, size_t dest_size,
 	     const void *src, size_t src_size);
 
-#if __XCC__ && !CONFIG_LIBRARY
+#if __XCC__ && XCHAL_HAVE_HIFI3 && !CONFIG_LIBRARY
 void *__vec_memcpy(void *dst, const void *src, size_t len);
 void *__vec_memset(void *dest, int data, size_t src_size);
 #endif
@@ -43,14 +47,14 @@ static inline int arch_memcpy_s(void *dest, size_t dest_size,
 	if (!dest || !src)
 		return -EINVAL;
 
-	if ((dest + dest_size >= src && dest + dest_size <= src + src_size) ||
-		(src + src_size >= dest && src + src_size <= dest + dest_size))
+	if ((dest >= src && (char *)dest < ((char *)src + src_size)) ||
+	    (src >= dest && (char *)src < ((char *)dest + dest_size)))
 		return -EINVAL;
 
 	if (src_size > dest_size)
 		return -EINVAL;
 
-#if __XCC__ && !CONFIG_LIBRARY
+#if __XCC__ && XCHAL_HAVE_HIFI3 && !CONFIG_LIBRARY
 	__vec_memcpy(dest, src, src_size);
 #else
 	memcpy(dest, src, src_size);
@@ -68,7 +72,7 @@ static inline int arch_memset_s(void *dest, size_t dest_size,
 	if (count > dest_size)
 		return -EINVAL;
 
-#if __XCC__ && !CONFIG_LIBRARY
+#if __XCC__ && XCHAL_HAVE_HIFI3 && !CONFIG_LIBRARY
 	if (!__vec_memset(dest, data, count))
 		return -ENOMEM;
 #else
@@ -77,4 +81,10 @@ static inline int arch_memset_s(void *dest, size_t dest_size,
 	return 0;
 }
 
-#endif
+#endif /* __ARCH_STRING_H__ */
+
+#else
+
+#error "This file shouldn't be included from outside of sof/string.h"
+
+#endif /* __SOF_STRING_H__ */

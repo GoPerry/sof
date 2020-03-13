@@ -2,23 +2,18 @@
 //
 // Copyright(c) 2019 Intel Corporation. All rights reserved.
 //
-// Author: Bartosz Kokoszko <bartoszx.kokoszko@linux.intel.com>
+// Author: Tomasz Lauda <tomasz.lauda@linux.intel.com>
 
-#include <sof/audio/component.h>
-#include <sof/task.h>
-#include <stdint.h>
-#include <sof/wait.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/schedule.h>
 
-/* TODO: Make host ll ops implementation */
-struct scheduler_ops schedule_ll_ops = {
-	.schedule_task = NULL,
-	.schedule_task_init = NULL,
-	.schedule_task_running = NULL,
-	.schedule_task_complete = NULL,
-	.reschedule_task = NULL,
-	.schedule_task_cancel = NULL,
-	.schedule_task_free = NULL,
-	.scheduler_init = NULL,
-	.scheduler_free = NULL,
-	.scheduler_run = NULL
-};
+int schedule_task_init_ll(struct task *task, uint16_t type, uint16_t priority,
+			  enum task_state (*run)(void *data), void *data,
+			  uint16_t core, uint32_t flags)
+{
+	int ret;
+
+	ret = schedule_task_init(task, type, priority, run, data, core, flags);
+
+	return ret;
+}

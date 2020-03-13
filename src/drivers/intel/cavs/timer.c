@@ -7,12 +7,14 @@
 //         Rander Wang <rander.wang@intel.com>
 //         Janusz Jankowski <janusz.jankowski@linux.intel.com>
 
-#include <platform/timer.h>
-#include <platform/shim.h>
-#include <sof/debug.h>
 #include <sof/audio/component.h>
-#include <sof/clk.h>
+#include <sof/drivers/interrupt.h>
 #include <sof/drivers/timer.h>
+#include <sof/lib/clk.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/shim.h>
+#include <sof/platform.h>
+#include <ipc/stream.h>
 #include <stdint.h>
 
 void platform_timer_start(struct timer *timer)
@@ -31,17 +33,22 @@ void platform_timer_stop(struct timer *timer)
 		   shim_read(SHIM_DSPWCTCS) & ~SHIM_DSPWCTCS_T0A);
 }
 
-int platform_timer_set(struct timer *timer, uint64_t ticks)
+int64_t platform_timer_set(struct timer *timer, uint64_t ticks)
 {
 	/* a tick value of 0 will not generate an IRQ */
 	if (ticks == 0)
 		ticks = 1;
 
-	/* set new value and run */
-	shim_write64(SHIM_DSPWCT0C, ticks);
+	/* Check if requested time is not past time */
+	if (ticks > shim_read64(SHIM_DSPWC))
+		shim_write64(SHIM_DSPWCT0C, ticks);
+	else
+		shim_write64(SHIM_DSPWCT0C, shim_read64(SHIM_DSPWC) + 1);
+
+	/* Enable IRQ */
 	shim_write(SHIM_DSPWCTCS, SHIM_DSPWCTCS_T0A);
 
-	return 0;
+	return shim_read64(SHIM_DSPWCT0C);
 }
 
 void platform_timer_clear(struct timer *timer)
@@ -97,80 +104,103 @@ static int platform_timer_register(struct timer *timer,
 	int err;
 
 	/* register timer interrupt */
-	err = interrupt_register(timer->irq, IRQ_MANUAL_UNMASK, handler, arg);
+	timer->logical_irq = interrupt_get_irq(timer->irq, timer->irq_name);
+	if (timer->logical_irq < 0)
+		return timer->logical_irq;
+
+	err = interrupt_register(timer->logical_irq, handler, arg);
 	if (err < 0)
 		return err;
 
 	/* enable timer interrupt */
-	interrupt_enable(timer->irq);
+	interrupt_enable(timer->logical_irq, arg);
 
 	/* disable timer interrupt on core level */
-	timer_disable(timer);
+	timer_disable(timer, arg, cpu_get_id());
 
 	return err;
 }
 
-int timer_register(struct timer *timer, void(*handler)(void *arg), void *arg)
+int timer_register(struct timer *timer, void (*handler)(void *arg), void *arg)
 {
+	int ret;
+
 	switch (timer->id) {
 	case TIMER0:
 	case TIMER1:
 	case TIMER2:
-		return arch_timer_register(timer, handler, arg);
+		ret = arch_timer_register(timer, handler, arg);
+		break;
 	case TIMER3:
-		return platform_timer_register(timer, handler, arg);
+	case TIMER4:
+		ret = platform_timer_register(timer, handler, arg);
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	platform_shared_commit(timer, sizeof(*timer));
+
+	return ret;
 }
 
-static void platform_timer_unregister(struct timer *timer)
+static void platform_timer_unregister(struct timer *timer, void *arg)
 {
 	/* disable timer interrupt */
-	interrupt_disable(timer->irq);
+	interrupt_disable(timer->logical_irq, arg);
 
 	/* unregister timer interrupt */
-	interrupt_unregister(timer->irq);
+	interrupt_unregister(timer->logical_irq, arg);
 }
 
-void timer_unregister(struct timer *timer)
+void timer_unregister(struct timer *timer, void *arg)
 {
 	switch (timer->id) {
 	case TIMER0:
 	case TIMER1:
 	case TIMER2:
-		interrupt_unregister(timer->irq);
+		interrupt_unregister(timer->logical_irq, arg);
 		break;
 	case TIMER3:
-		platform_timer_unregister(timer);
+	case TIMER4:
+		platform_timer_unregister(timer, arg);
 		break;
 	}
+
+	platform_shared_commit(timer, sizeof(*timer));
 }
 
-void timer_enable(struct timer *timer)
+void timer_enable(struct timer *timer, void *arg, int core)
 {
 	switch (timer->id) {
 	case TIMER0:
 	case TIMER1:
 	case TIMER2:
-		interrupt_enable(timer->irq);
+		interrupt_enable(timer->logical_irq, arg);
 		break;
 	case TIMER3:
-		platform_interrupt_unmask(timer->irq, 0);
+	case TIMER4:
+		interrupt_unmask(timer->logical_irq, core);
 		break;
 	}
+
+	platform_shared_commit(timer, sizeof(*timer));
 }
 
-void timer_disable(struct timer *timer)
+void timer_disable(struct timer *timer, void *arg, int core)
 {
 	switch (timer->id) {
 	case TIMER0:
 	case TIMER1:
 	case TIMER2:
-		interrupt_disable(timer->irq);
+		interrupt_disable(timer->logical_irq, arg);
 		break;
 	case TIMER3:
-		platform_interrupt_mask(timer->irq, 0);
+	case TIMER4:
+		interrupt_mask(timer->logical_irq, core);
 		break;
 	}
+
+	platform_shared_commit(timer, sizeof(*timer));
 }

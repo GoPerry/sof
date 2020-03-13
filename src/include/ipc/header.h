@@ -13,10 +13,10 @@
  * \author Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_IPC_HEADER_H__
-#define __INCLUDE_UAPI_IPC_HEADER_H__
+#ifndef __IPC_HEADER_H__
+#define __IPC_HEADER_H__
 
-#include <kernel/abi.h>
+#include <stdint.h>
 
 /** \addtogroup sof_uapi uAPI
  *  SOF uAPI specification.
@@ -26,7 +26,7 @@
  * 0xGCCCNNNN where
  * - G is global cmd type (4 bits)
  * - C is command type (12 bits)
- * - I is the ID number (16 bits) - monotonic and overflows
+ * - N is the ID number (16 bits) - monotonic and overflows
  *
  * This is sent at the start of the IPM message in the mailbox. Messages should
  * not be sent in the doorbell (special exceptions for firmware).
@@ -71,6 +71,7 @@
 #define SOF_IPC_GLB_TRACE_MSG			SOF_GLB_TYPE(0x9U)
 #define SOF_IPC_GLB_GDB_DEBUG                   SOF_GLB_TYPE(0xAU)
 #define SOF_IPC_GLB_TEST			SOF_GLB_TYPE(0xBU)
+#define SOF_IPC_GLB_PROBE			SOF_GLB_TYPE(0xCU)
 
 /** @} */
 
@@ -102,6 +103,9 @@
 #define SOF_IPC_PM_CLK_GET			SOF_CMD_TYPE(0x005)
 #define SOF_IPC_PM_CLK_REQ			SOF_CMD_TYPE(0x006)
 #define SOF_IPC_PM_CORE_ENABLE			SOF_CMD_TYPE(0x007)
+#define SOF_IPC_PM_GATE				SOF_CMD_TYPE(0x008)
+
+/** @} */
 
 /** \name DSP Command: Component runtime config - multiple different types
  *  @{
@@ -150,6 +154,21 @@
 #define SOF_IPC_TRACE_DMA_PARAMS_EXT		SOF_CMD_TYPE(0x003)
 
 /** @} */
+
+/** \name DSP Command: Probes
+ *  @{
+ */
+
+#define SOF_IPC_PROBE_INIT			SOF_CMD_TYPE(0x001)
+#define SOF_IPC_PROBE_DEINIT			SOF_CMD_TYPE(0x002)
+#define SOF_IPC_PROBE_DMA_ADD			SOF_CMD_TYPE(0x003)
+#define SOF_IPC_PROBE_DMA_INFO			SOF_CMD_TYPE(0x004)
+#define SOF_IPC_PROBE_DMA_REMOVE		SOF_CMD_TYPE(0x005)
+#define SOF_IPC_PROBE_POINT_ADD			SOF_CMD_TYPE(0x006)
+#define SOF_IPC_PROBE_POINT_INFO		SOF_CMD_TYPE(0x007)
+#define SOF_IPC_PROBE_POINT_REMOVE		SOF_CMD_TYPE(0x008)
+
+ /** @} */
 
 /** \name DSP Command: Test - Debug build only
  *  @{
@@ -237,4 +256,4 @@ struct sof_ipc_dsp_oops_plat_hdr {
 
 /** @}*/
 
-#endif
+#endif /* __IPC_HEADER_H__ */

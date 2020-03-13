@@ -6,13 +6,17 @@
  *         Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_LIB_PLATFORM_PLATFORM_H__
-#define __INCLUDE_LIB_PLATFORM_PLATFORM_H__
+#ifdef __SOF_PLATFORM_H__
 
-#include <platform/shim.h>
-#include <platform/interrupt.h>
-#include <stdio.h>
-#include <stdlib.h>
+#ifndef __PLATFORM_PLATFORM_H__
+#define __PLATFORM_PLATFORM_H__
+
+#include <arch/lib/wait.h>
+#include <sof/lib/clk.h>
+#include <stdint.h>
+
+struct ipc_msg;
+struct timer;
 
 /*! \def PLATFORM_DEFAULT_CLOCK
  *  \brief clock source for audio pipeline
@@ -23,20 +27,12 @@
  */
 #define PLATFORM_DEFAULT_CLOCK CLK_CPU(0)
 
-/*! \def PLATFORM_WORKQ_DEFAULT_TIMEOUT
- *  \brief work queue default timeout in microseconds
- */
-#define PLATFORM_WORKQ_DEFAULT_TIMEOUT	1000
-
 /* Host page size */
 #define HOST_PAGE_SIZE		4096
 
 /* Platform stream capabilities */
 #define PLATFORM_MAX_CHANNELS	8
 #define PLATFORM_MAX_STREAMS	16
-
-/* DMA channel drain timeout in microseconds */
-#define PLATFORM_DMA_TIMEOUT	1333
 
 /* IPC page data copy timeout */
 #define PLATFORM_IPC_DMA_TIMEOUT 2000
@@ -46,6 +42,22 @@
 
 static inline void platform_panic(uint32_t p) {}
 
-extern struct timer *platform_timer;
+/**
+ * \brief Platform specific CPU entering idle.
+ * May be power-optimized using platform specific capabilities.
+ * @param level Interrupt level.
+ */
+static inline void platform_wait_for_interrupt(int level)
+{
+	arch_wait_for_interrupt(level);
+}
 
-#endif
+static inline int ipc_platform_send_msg(struct ipc_msg *msg) { return 0; }
+
+#endif /* __PLATFORM_PLATFORM_H__ */
+
+#else
+
+#error "This file shouldn't be included from outside of sof/platform.h"
+
+#endif /* __SOF_PLATFORM_H__ */

@@ -18,16 +18,22 @@ elseif(CONFIG_SUECREEK)
 	set(platform_folder suecreek)
 elseif(CONFIG_ICELAKE)
 	set(platform_folder icelake)
+elseif(CONFIG_TIGERLAKE)
+	set(platform_folder tigerlake)
+	if(XCC)
+		set(RIMAGE_MOD_OFFSET_FLAG -x 24)
+	endif()
 elseif(CONFIG_IMX8)
 	set(platform_folder imx8)
+elseif(CONFIG_IMX8X)
+	set(platform_folder imx8)
+elseif(CONFIG_IMX8M)
+	set(platform_folder imx8m)
 endif()
 
 set(fw_name ${CONFIG_FIRMWARE_SHORT_NAME})
 
-if(CONFIG_APOLLOLAKE
-   OR CONFIG_CANNONLAKE
-   OR CONFIG_SUECREEK
-   OR CONFIG_ICELAKE)
+if(CONFIG_BOOT_LOADER)
 	set(build_bootloader y)
 	set(build_module y)
 endif()
@@ -38,19 +44,10 @@ set(platform_bootldr_ld_script boot_ldr.x)
 
 # includes
 
-target_include_directories(sof_options INTERFACE ${PROJECT_SOURCE_DIR}/src/arch/xtensa/include)
-
-if(CONFIG_SMP)
-	target_include_directories(sof_options INTERFACE
-		${PROJECT_SOURCE_DIR}/src/arch/xtensa/smp/include
-		${PROJECT_SOURCE_DIR}/src/arch/xtensa/smp/xtos
-	)
-else()
-	target_include_directories(sof_options INTERFACE
-		${PROJECT_SOURCE_DIR}/src/arch/xtensa/up/include
-		${PROJECT_SOURCE_DIR}/src/arch/xtensa/up/xtos
-	)
-endif()
+target_include_directories(sof_options INTERFACE
+	${PROJECT_SOURCE_DIR}/src/arch/xtensa/include
+	${PROJECT_SOURCE_DIR}/src/arch/xtensa/xtos
+)
 
 target_include_directories(sof_options INTERFACE ${PROJECT_SOURCE_DIR}/src/platform/${platform_folder}/include)
 
@@ -68,11 +65,35 @@ else()
 	set(stdlib_flag "-nostdlib")
 endif()
 
+get_optimization_flag(optimization_flag)
+
+if(BUILD_CLANG_SCAN)
+	# pretend to be xtensa compiler to go trough the same paths for AST
+	target_compile_definitions(sof_options INTERFACE -D__XTENSA__=1)
+
+	if(XCC)
+		# clang has to compile objects in order to analyze sources,
+		# so it needs xcc's headers
+		find_program(XCC_PATH NAMES "xt-xcc" PATHS ENV PATH NO_DEFAULT_PATH)
+		get_filename_component(XCC_DIR ${XCC_PATH} DIRECTORY)
+		target_include_directories(sof_options INTERFACE ${XCC_DIR}/../xtensa-elf/include)
+	endif()
+
+	# Clang by default compiles for host architecture,
+	# but xtensa is always 32 bit, what may cause mismatch in definitions,
+	# that depend on bitness, so force compilation for 32 bit.
+	set(XTENSA_C_ASM_FLAGS -m32)
+	set(XTENSA_C_FLAGS)
+else()
+	set(XTENSA_C_ASM_FLAGS -mlongcalls)
+	set(XTENSA_C_FLAGS -mtext-section-literals)
+endif()
+
 # linker flags
 target_link_libraries(sof_options INTERFACE ${stdlib_flag} -Wl,--no-check-sections -ucall_user_start -Wl,-static)
 
 # C & ASM flags
-target_compile_options(sof_options INTERFACE ${stdlib_flag} -fno-inline-functions -mlongcalls)
+target_compile_options(sof_options INTERFACE ${stdlib_flag} -fno-inline-functions ${XTENSA_C_ASM_FLAGS})
 
 # C flags
 # TODO: Generator expressions are supported only with Make and Ninja,
@@ -84,7 +105,7 @@ target_compile_options(sof_options INTERFACE ${stdlib_flag} -fno-inline-function
 #      better to have set of default flags and change it only for special cases
 #   3) custom function that is used instead of target_sources and sets flags
 #      for each added source based on file extension
-target_compile_options(sof_options INTERFACE $<$<COMPILE_LANGUAGE:C>:-O2 -g -Wall -Werror -Wl,-EL -Wmissing-prototypes -mtext-section-literals>)
+target_compile_options(sof_options INTERFACE $<$<COMPILE_LANGUAGE:C>: -${optimization_flag} -g -Wall -Werror -Wl,-EL -Wmissing-prototypes -Wpointer-arith ${XTENSA_C_FLAGS}>)
 
 if(BUILD_UNIT_TESTS)
 	# rest of this file is not needed for unit tests
@@ -149,112 +170,76 @@ add_library(reset STATIC "")
 target_link_libraries(reset sof_options)
 target_compile_options(reset PRIVATE -mtext-section-literals)
 
-if(CONFIG_SMP)
-	add_local_sources(reset
-		smp/xtos/memctl_default.S
-		smp/xtos/reset-vector.S
-	)
-else()
-	add_local_sources(reset
-		up/xtos/reset-vector.S
-	)
-endif()
+add_subdirectory(debug)
+add_subdirectory(drivers)
+add_subdirectory(hal)
+add_subdirectory(lib)
+add_subdirectory(schedule)
+add_subdirectory(xtos)
 
-add_local_sources(sof task.c timer.c exc-dump.S)
+add_local_sources(reset xtos/memctl_default.S xtos/reset-vector.S)
 
-if(CONFIG_GDB_DEBUG)
-	add_subdirectory(gdb)
-endif()
-
-if(CONFIG_SMP)
-# TODO it should be handled in subdir
-	add_subdirectory(smp)
-	add_local_sources(sof
-		smp/xtos/crt1-boards.S
-		smp/xtos/_vectors.S
-		smp/cpu.c
-		smp/idc.c
-		smp/init.c
-		smp/notifier.c
-		smp/schedule.c
-		smp/task.c
-	)
-else()
-	add_subdirectory(up)
-	add_local_sources(sof
-		up/xtos/crt1-boards.S
-		up/xtos/_vectors.S
-		up/cpu.c
-		up/init.c
-		up/notifier.c
-		up/schedule.c
-		up/task.c
-	)
-endif()
-
-add_library(sof_lib INTERFACE)
-target_link_libraries(sof_lib INTERFACE sof_options)
+add_local_sources(sof
+	xtos/crt1-boards.S
+	xtos/_vectors.S
+	init.c
+	exc-dump.S
+)
 
 # TODO: order of these libraries does matter, what is bad,
 # we should switch to building with thin archives without symbols index
 # and made it before final link so dependencies won't matter
-target_link_libraries(sof_lib INTERFACE xtos)
-target_link_libraries(sof_lib INTERFACE hal)
+target_link_libraries(sof_static_libraries INTERFACE xtos)
+target_link_libraries(sof_static_libraries INTERFACE hal)
 
-target_link_libraries(sof_lib INTERFACE xlevel2)
-target_link_libraries(sof_lib INTERFACE xlevel3)
-target_link_libraries(sof_lib INTERFACE xlevel4)
-target_link_libraries(sof_lib INTERFACE xlevel5)
+if(CONFIG_INTERRUPT_LEVEL_2)
+target_link_libraries(sof_static_libraries INTERFACE xlevel2)
+endif()
+if(CONFIG_INTERRUPT_LEVEL_3)
+target_link_libraries(sof_static_libraries INTERFACE xlevel3)
+endif()
+if(CONFIG_INTERRUPT_LEVEL_4)
+target_link_libraries(sof_static_libraries INTERFACE xlevel4)
+endif()
+if(CONFIG_INTERRUPT_LEVEL_5)
+target_link_libraries(sof_static_libraries INTERFACE xlevel5)
+endif()
 
 if(build_bootloader)
 	add_local_sources(sof main-entry.S)
 else()
-	target_link_libraries(sof_lib INTERFACE reset)
+	target_link_libraries(sof_static_libraries INTERFACE reset)
 endif()
 
 target_link_libraries(sof_ld_flags INTERFACE "-lgcc")
 target_link_libraries(sof_ld_flags INTERFACE "-Wl,-Map=sof.map")
 target_link_libraries(sof_ld_flags INTERFACE "-T${PROJECT_BINARY_DIR}/${platform_ld_script}")
 
-# rimage
-
-include(ExternalProject)
-
-ExternalProject_Add(rimage_ep
-	DEPENDS check_version_h
-	DOWNLOAD_COMMAND ""
-	SOURCE_DIR "${PROJECT_SOURCE_DIR}/rimage"
-	PREFIX "${PROJECT_BINARY_DIR}/rimage_ep"
-	BINARY_DIR "${PROJECT_BINARY_DIR}/rimage_ep/build"
-	BUILD_ALWAYS 1
-	CMAKE_ARGS -DVERSION_H_PATH=${VERSION_H_PATH}
-		-DPEM_KEY_PREFIX=${PROJECT_SOURCE_DIR}/rimage/keys
-	INSTALL_COMMAND ""
-)
-
 add_custom_target(
-	prepare_fw_copy_for_rimage
-	DEPENDS sof rimage_ep
+	prepare_sof_post_process
+	DEPENDS sof
 	COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_BINARY_DIR}/sof sof-${fw_name}
 )
+
+# contains steps that should be performed before fw image is ready for being
+# processed by tools like rimage and MEU
+add_custom_target(sof_post_process DEPENDS prepare_sof_post_process)
+
+# contains extra output that should be generated for bin target
+add_custom_target(bin_extras)
 
 # bootloader binary
 
 if(build_bootloader)
 	add_executable(bootloader "")
 	target_link_libraries(bootloader PRIVATE sof_options)
-	add_local_sources(bootloader boot_entry.S boot_loader.c)
+	add_local_sources(bootloader xtos/_vectors.S boot_entry.S boot_loader.c)
 	target_link_libraries(bootloader PRIVATE reset)
 	target_link_libraries(bootloader PRIVATE hal)
 	target_link_libraries(bootloader PRIVATE "-lgcc")
 	target_link_libraries(bootloader PRIVATE "-T${PROJECT_BINARY_DIR}/${platform_bootldr_ld_script}")
 	sof_add_ld_script(bootloader ${platform_bootldr_ld_script})
-
-	if(CONFIG_SMP)
-		add_local_sources(bootloader smp/xtos/_vectors.S)
-	else()
-		add_local_sources(bootloader up/xtos/_vectors.S)
-	endif()
+	sof_append_relative_path_definitions(bootloader)
 
 	add_custom_target(
 		bootloader_dump
@@ -276,14 +261,52 @@ if(build_bootloader)
 		process_base_module
 		COMMAND ${CMAKE_OBJCOPY} -O binary ${PROJECT_BINARY_DIR}/src/platform/${platform_folder}/base_module mod-${fw_name}.bin
 		COMMAND ${CMAKE_OBJCOPY} --add-section .module=mod-${fw_name}.bin --set-section-flags .module=load,readonly sof-${fw_name}
-		DEPENDS prepare_fw_copy_for_rimage base_module bootloader_dump
+		DEPENDS prepare_sof_post_process base_module bootloader_dump
 		VERBATIM
 		USES_TERMINAL
 	)
-else()
-	set(bootloader_binary_path "")
 
-	add_custom_target(process_base_module DEPENDS prepare_fw_copy_for_rimage)
+	add_dependencies(sof_post_process process_base_module)
+else()
+	set(bootloader_binary_path)
+endif()
+
+if(CONFIG_BUILD_VM_ROM)
+	add_executable(rom "")
+	target_link_libraries(rom PRIVATE sof_options)
+	target_link_libraries(rom PRIVATE "-lgcc")
+	target_link_libraries(rom PRIVATE "-T${PROJECT_BINARY_DIR}/${platform_rom_ld_script}")
+	sof_add_ld_script(rom ${platform_rom_ld_script})
+
+	# We have to make additional define, because sources
+	# are reused for other objects with different flags.
+	target_compile_definitions(rom PRIVATE -DCONFIG_VM_ROM)
+
+	add_local_sources(rom
+		xtos/crt1-boards-rom.S
+		xtos/memctl_default.S
+		xtos/reset-vector.S
+	)
+
+	add_custom_target(
+		rom_dump
+		COMMAND ${CMAKE_COMMAND} -E copy rom rom-${fw_name}
+		COMMAND ${CMAKE_OBJCOPY} -O binary rom rom-${fw_name}.bin
+		COMMAND ${CMAKE_OBJDUMP} -h -D rom > rom-${fw_name}.lmap
+		COMMAND ${CMAKE_OBJDUMP} -S rom > rom-${fw_name}.lst
+		COMMAND ${CMAKE_OBJDUMP} -D rom > rom-${fw_name}.dis
+		DEPENDS rom
+		VERBATIM
+		USES_TERMINAL
+	)
+
+	add_dependencies(bin_extras rom_dump)
+endif()
+
+if(BUILD_CLANG_SCAN)
+	# steps below don't compile parts of fw,
+	# so they are not needed for scan-build
+	return()
 endif()
 
 add_custom_target(
@@ -291,9 +314,25 @@ add_custom_target(
 	COMMAND ${CMAKE_OBJDUMP} -S sof-${fw_name} > sof-${fw_name}.lst
 	COMMAND ${CMAKE_OBJDUMP} -h sof-${fw_name} > sof-${fw_name}.lmap
 	COMMAND ${CMAKE_OBJDUMP} -D sof-${fw_name} > sof-${fw_name}.dis
-	DEPENDS process_base_module
+	DEPENDS sof_post_process
 	VERBATIM
 	USES_TERMINAL
+)
+
+# rimage
+
+include(ExternalProject)
+
+ExternalProject_Add(rimage_ep
+	DEPENDS check_version_h
+	DOWNLOAD_COMMAND ""
+	SOURCE_DIR "${PROJECT_SOURCE_DIR}/rimage"
+	PREFIX "${PROJECT_BINARY_DIR}/rimage_ep"
+	BINARY_DIR "${PROJECT_BINARY_DIR}/rimage_ep/build"
+	BUILD_ALWAYS 1
+	CMAKE_ARGS -DVERSION_H_PATH=${VERSION_H_PATH}
+		-DPEM_KEY_PREFIX=${PROJECT_SOURCE_DIR}/rimage/keys
+	INSTALL_COMMAND ""
 )
 
 if(NOT DEFINED RIMAGE_PRIVATE_KEY)
@@ -317,8 +356,10 @@ if(MEU_PATH)
 
 	if(MEU_VERSION VERSION_LESS 12.0.0.1035)
 		set(MEU_OFFSET 1152)
-	else()
+	elseif(MEU_VERSION VERSION_LESS 15.0.0.7041)
 		set(MEU_OFFSET 1088)
+	else()
+		set(MEU_OFFSET 1344)
 	endif()
 
 	add_custom_target(
@@ -330,9 +371,10 @@ if(MEU_PATH)
 			-s ${MEU_OFFSET}
 			-k ${RIMAGE_PRIVATE_KEY}
 			-i ${RIMAGE_IMR_TYPE}
+			${RIMAGE_MOD_OFFSET_FLAG}
 			${bootloader_binary_path}
 			sof-${fw_name}
-		DEPENDS sof_dump
+		DEPENDS sof_dump rimage_ep
 		VERBATIM
 		USES_TERMINAL
 	)
@@ -369,9 +411,10 @@ else()
 			-m ${fw_name}
 			-k ${RIMAGE_PRIVATE_KEY}
 			-i ${RIMAGE_IMR_TYPE}
+			${RIMAGE_MOD_OFFSET_FLAG}
 			${bootloader_binary_path}
 			sof-${fw_name}
-		DEPENDS sof_dump
+		DEPENDS sof_dump rimage_ep
 		VERBATIM
 		USES_TERMINAL
 	)
@@ -382,7 +425,7 @@ add_custom_target(
 	bin ALL
 	COMMAND ${CMAKE_COMMAND} -E copy sof-${fw_name}.ri ${PROJECT_BINARY_DIR}/sof-${fw_name}.ri
 	COMMAND ${CMAKE_COMMAND} -E copy sof-${fw_name}.ldc ${PROJECT_BINARY_DIR}/sof-${fw_name}.ldc
-	DEPENDS run_meu
+	DEPENDS run_meu bin_extras
 	VERBATIM
 	USES_TERMINAL
 )
@@ -392,43 +435,3 @@ install(
 		${PROJECT_BINARY_DIR}/sof-${fw_name}.ldc
 	DESTINATION bin
 )
-
-if(CONFIG_BUILD_VM_ROM)
-	add_executable(rom "")
-	target_link_libraries(rom PRIVATE sof_options)
-	target_link_libraries(rom PRIVATE "-lgcc")
-	target_link_libraries(rom PRIVATE "-T${PROJECT_BINARY_DIR}/${platform_rom_ld_script}")
-	sof_add_ld_script(rom ${platform_rom_ld_script})
-
-	# We have to make additional define, because sources
-	# are reused for other objects with different flags.
-	target_compile_definitions(rom PRIVATE -DCONFIG_VM_ROM)
-
-	if(CONFIG_SMP)
-		# SMP ROM uses UP CRT1
-		add_local_sources(rom
-			smp/xtos/memctl_default.S
-			smp/xtos/reset-vector.S
-			up/xtos/crt1-boards.S
-		)
-	else()
-		add_local_sources(rom
-			up/xtos/reset-vector.S
-			up/xtos/crt1-boards.S
-		)
-	endif()
-
-	add_custom_target(
-		rom_dump
-		COMMAND ${CMAKE_COMMAND} -E copy rom rom-${fw_name}
-		COMMAND ${CMAKE_OBJCOPY} -O binary rom rom-${fw_name}.bin
-		COMMAND ${CMAKE_OBJDUMP} -h -D rom > rom-${fw_name}.lmap
-		COMMAND ${CMAKE_OBJDUMP} -S rom > rom-${fw_name}.lst
-		COMMAND ${CMAKE_OBJDUMP} -D rom > rom-${fw_name}.dis
-		DEPENDS rom
-		VERBATIM
-		USES_TERMINAL
-	)
-
-	add_dependencies(bin rom_dump)
-endif()

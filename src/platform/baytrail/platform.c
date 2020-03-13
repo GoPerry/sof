@@ -5,36 +5,44 @@
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
-#include <platform/memory.h>
-#include <platform/mailbox.h>
-#include <platform/shim.h>
-#include <platform/dma.h>
-#include <platform/dai.h>
-#include <platform/clk.h>
-#include <platform/timer.h>
-#include <platform/pmc.h>
-#include <platform/platform.h>
-#include <ipc/info.h>
-#include <sof/mailbox.h>
-#include <sof/dai.h>
-#include <sof/dma.h>
-#include <sof/interrupt.h>
-#include <sof/sof.h>
-#include <sof/clk.h>
-#include <sof/ipc.h>
-#include <sof/trace.h>
-#include <sof/agent.h>
-#include <sof/dma-trace.h>
-#include <sof/audio/component.h>
+#include <sof/compiler_info.h>
+#include <sof/debug/debug.h>
+#include <sof/drivers/dw-dma.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
+#include <sof/drivers/pmc.h>
 #include <sof/drivers/timer.h>
-#include <sof/cpu.h>
-#include <sof/notifier.h>
+#include <sof/fw-ready-metadata.h>
+#include <sof/lib/agent.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/clk.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/dai.h>
+#include <sof/lib/dma.h>
+#include <sof/lib/mailbox.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/notifier.h>
+#include <sof/lib/shim.h>
+#include <sof/platform.h>
+#include <sof/schedule/edf_schedule.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/ll_schedule_domain.h>
+#include <sof/sof.h>
+#include <sof/trace/dma-trace.h>
+#include <sof/trace/trace.h>
+#include <ipc/dai.h>
+#include <ipc/header.h>
+#include <ipc/info.h>
+#include <kernel/abi.h>
 #include <config.h>
-#include <sof/string.h>
 #include <version.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 static const struct sof_ipc_fw_ready ready
-	__attribute__((section(".fw_ready"))) = {
+	__section(".fw_ready") = {
 	.hdr = {
 		.cmd = SOF_IPC_FW_READY,
 		.size = sizeof(struct sof_ipc_fw_ready),
@@ -45,7 +53,7 @@ static const struct sof_ipc_fw_ready ready
 		.micro = SOF_MICRO,
 		.minor = SOF_MINOR,
 		.major = SOF_MAJOR,
-#ifdef CONFIG_DEBUG
+#if CONFIG_DEBUG
 		/* only added in debug for reproducability in releases */
 		.build = SOF_BUILD,
 		.date = __DATE__,
@@ -58,7 +66,8 @@ static const struct sof_ipc_fw_ready ready
 };
 
 #define NUM_BYT_WINDOWS		6
-static const struct sof_ipc_window sram_window = {
+static const struct sof_ipc_window sram_window
+	__section(".fw_ready_metadata") = {
 	.ext_hdr	= {
 		.hdr.cmd = SOF_IPC_FW_READY,
 		.hdr.size = sizeof(struct sof_ipc_window) +
@@ -112,30 +121,34 @@ static const struct sof_ipc_window sram_window = {
 	},
 };
 
-struct timesource_data platform_generic_queue[] = {
-{
-	.timer	 = {
-		.id = TIMER3,	/* external timer */
-		.irq = IRQ_NUM_EXT_TIMER,
-	},
-	.clk		= PLATFORM_WORKQ_CLOCK,
-	.notifier	= NOTIFIER_ID_SSP_FREQ,
-	.timer_set	= platform_timer_set,
-	.timer_clear	= platform_timer_clear,
-	.timer_get	= platform_timer_get,
-},
+SHARED_DATA struct timer timer = {
+	.id = TIMER3, /* external timer */
+	.irq = IRQ_NUM_EXT_TIMER,
 };
-
-struct timer *platform_timer =
-	&platform_generic_queue[PLATFORM_MASTER_CORE_ID].timer;
 
 int platform_boot_complete(uint32_t boot_message)
 {
+	uint32_t mb_offset = 0;
 	uint64_t outbox = MAILBOX_HOST_OFFSET >> 3;
 
-	mailbox_dspbox_write(0, &ready, sizeof(ready));
-	mailbox_dspbox_write(sizeof(ready), &sram_window,
+	mailbox_dspbox_write(mb_offset, &ready, sizeof(ready));
+	mb_offset = mb_offset + sizeof(ready);
+
+	mailbox_dspbox_write(mb_offset, &sram_window,
 			     sram_window.ext_hdr.hdr.size);
+	mb_offset = mb_offset + sram_window.ext_hdr.hdr.size;
+
+	/* variable length compiler description is a last field of cc_version */
+	mailbox_dspbox_write(mb_offset, &cc_version,
+			     cc_version.ext_hdr.hdr.size);
+	mb_offset = mb_offset + cc_version.ext_hdr.hdr.size;
+
+	mailbox_dspbox_write(mb_offset, &probe_support,
+			     probe_support.ext_hdr.hdr.size);
+	mb_offset = mb_offset + probe_support.ext_hdr.hdr.size;
+
+	mailbox_dspbox_write(mb_offset, &user_abi_version,
+			     user_abi_version.ext_hdr.hdr.size);
 
 	/* now interrupt host to tell it we are done booting */
 	shim_write(SHIM_IPCDL, SOF_IPC_FW_READY | outbox);
@@ -168,9 +181,12 @@ int platform_init(struct sof *sof)
 #endif
 	int ret;
 
+	sof->platform_timer = &timer;
+	sof->cpu_timer = &timer;
+
 	/* clear mailbox for early trace and debug */
 	trace_point(TRACE_BOOT_PLATFORM_MBOX);
-	bzero((void *)MAILBOX_BASE, IPC_MAX_MAILBOX_BYTES);
+	bzero((void *)MAILBOX_BASE, MAILBOX_SIZE);
 
 	/* configure the shim */
 	trace_point(TRACE_BOOT_PLATFORM_SHIM);
@@ -186,17 +202,23 @@ int platform_init(struct sof *sof)
 
 	/* init timers, clocks and schedulers */
 	trace_point(TRACE_BOOT_PLATFORM_TIMER);
-	platform_timer_start(platform_timer);
+	platform_timer_start(sof->platform_timer);
 
 	trace_point(TRACE_BOOT_PLATFORM_CLOCK);
-	clock_init();
+	platform_clock_init(sof);
 
 	trace_point(TRACE_BOOT_PLATFORM_SCHED);
-	scheduler_init();
+	scheduler_init_edf();
+
+	/* init low latency timer domain and scheduler */
+	sof->platform_timer_domain =
+		timer_domain_init(sof->platform_timer, PLATFORM_DEFAULT_CLOCK,
+				  CONFIG_SYSTICK_PERIOD);
+	scheduler_init_ll(sof->platform_timer_domain);
 
 	/* init the system agent */
 	trace_point(TRACE_BOOT_PLATFORM_AGENT);
-	sa_init(sof);
+	sa_init(sof, CONFIG_SYSTICK_PERIOD);
 
 	/* Set CPU to default frequency for booting */
 	trace_point(TRACE_BOOT_PLATFORM_CPU_FREQ);
@@ -208,16 +230,23 @@ int platform_init(struct sof *sof)
 
 	/* init DMACs */
 	trace_point(TRACE_BOOT_PLATFORM_DMA);
-	ret = dmac_init();
+	ret = dmac_init(sof);
 	if (ret < 0)
 		return -ENODEV;
+
+	/* init low latency multi channel DW-DMA domain and scheduler */
+	sof->platform_dma_domain = dma_multi_chan_domain_init
+			(&sof->dma_info->dma_array[PLATFORM_DW_DMA_INDEX],
+			 PLATFORM_NUM_DW_DMACS,
+			 PLATFORM_DEFAULT_CLOCK, true);
+	scheduler_init_ll(sof->platform_dma_domain);
 
 	/* initialise the host IPC mechanisms */
 	trace_point(TRACE_BOOT_PLATFORM_IPC);
 	ipc_init(sof);
 
 	trace_point(TRACE_BOOT_PLATFORM_DAI);
-	ret = dai_init();
+	ret = dai_init(sof);
 	if (ret < 0)
 		return -ENODEV;
 
@@ -229,38 +258,48 @@ int platform_init(struct sof *sof)
 	shim_write(SHIM_PIMRH, shim_read(SHIM_PIMRH) | 0x00000700);
 #endif
 
+	/* Reset M/N SSP clock dividers */
+	shim_write(SHIM_SSP0_DIVL, 1);
+	shim_write(SHIM_SSP0_DIVH, 0x80000001);
+	shim_write(SHIM_SSP1_DIVL, 1);
+	shim_write(SHIM_SSP1_DIVH, 0x80000001);
+	shim_write(SHIM_SSP2_DIVL, 1);
+	shim_write(SHIM_SSP2_DIVH, 0x80000001);
+#if defined CONFIG_CHERRYTRAIL
+	shim_write(SHIM_SSP3_DIVL, 1);
+	shim_write(SHIM_SSP3_DIVH, 0x80000001);
+	shim_write(SHIM_SSP4_DIVL, 1);
+	shim_write(SHIM_SSP4_DIVH, 0x80000001);
+	shim_write(SHIM_SSP5_DIVL, 1);
+	shim_write(SHIM_SSP5_DIVH, 0x80000001);
+#endif
+
 	/* init SSP ports */
 	trace_point(TRACE_BOOT_PLATFORM_SSP);
 	ssp0 = dai_get(SOF_DAI_INTEL_SSP, 0, DAI_CREAT);
 	if (ssp0 == NULL)
 		return -ENODEV;
-	dai_probe(ssp0);
 
 	ssp1 = dai_get(SOF_DAI_INTEL_SSP, 1, DAI_CREAT);
 	if (ssp1 == NULL)
 		return -ENODEV;
-	dai_probe(ssp1);
 
 	ssp2 = dai_get(SOF_DAI_INTEL_SSP, 2, DAI_CREAT);
 	if (ssp2 == NULL)
 		return -ENODEV;
-	dai_probe(ssp2);
 
 #if defined CONFIG_CHERRYTRAIL
 	ssp3 = dai_get(SOF_DAI_INTEL_SSP, 3, DAI_CREAT);
 	if (ssp3 == NULL)
 		return -ENODEV;
-	dai_probe(ssp3);
 
 	ssp4 = dai_get(SOF_DAI_INTEL_SSP, 4, DAI_CREAT);
 	if (ssp4 == NULL)
 		return -ENODEV;
-	dai_probe(ssp4);
 
 	ssp5 = dai_get(SOF_DAI_INTEL_SSP, 5, DAI_CREAT);
 	if (ssp5 == NULL)
 		return -ENODEV;
-	dai_probe(ssp5);
 #endif
 
 #if CONFIG_TRACE

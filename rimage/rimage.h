@@ -35,8 +35,11 @@ enum machine_id {
 	MACHINE_SKYLAKE,
 	MACHINE_CANNONLAKE,
 	MACHINE_ICELAKE,
+	MACHINE_TIGERLAKE,
 	MACHINE_SUECREEK,
 	MACHINE_IMX8,
+	MACHINE_IMX8X,
+	MACHINE_IMX8M,
 	MACHINE_MAX
 };
 
@@ -65,6 +68,7 @@ struct module {
 	int fw_size;
 	int bss_index;
 	int logs_index;
+	int uids_index;
 	int fw_ready_index;
 
 	/* sizes do not include any gaps */
@@ -104,8 +108,9 @@ struct image {
 	struct module module[MAX_MODULES];
 	uint32_t image_end;/* module end, equal to output image size */
 	int meu_offset;
+	int xcc_mod_offset;
 
-	/* SHA 256 */
+	/* SHA 256 & 384 */
 	const char *key_name;
 	EVP_MD_CTX *mdctx;
 	const EVP_MD *md;
@@ -140,20 +145,24 @@ struct adsp {
 	enum machine_id machine_id;
 	int (*write_firmware)(struct image *image);
 	int (*write_firmware_meu)(struct image *image);
+	struct fw_image_manifest_v2_5 *man_v2_5;
 	struct fw_image_manifest_v1_8 *man_v1_8;
 	struct fw_image_manifest_v1_5 *man_v1_5;
 	struct fw_image_manifest_v1_5_sue *man_v1_5_sue;
 	int exec_boot_ldr;
 };
 
-int write_logs_dictionary(struct image *image);
+int write_dictionaries(struct image *image);
 
 void module_sha256_create(struct image *image);
-void module_sha256_update(struct image *image, uint8_t *data, size_t bytes);
-void module_sha256_complete(struct image *image, uint8_t *hash);
+void module_sha_update(struct image *image, uint8_t *data, size_t bytes);
+void module_sha_complete(struct image *image, uint8_t *hash);
 int ri_manifest_sign_v1_5(struct image *image);
 int ri_manifest_sign_v1_8(struct image *image);
-void ri_hash(struct image *image, unsigned offset, unsigned size, uint8_t *hash);
+void ri_sha256(struct image *image, unsigned int offset, unsigned int size,
+	       uint8_t *hash);
+void ri_sha384(struct image *image, unsigned int offset, unsigned int size,
+	       uint8_t *hash);
 
 int pkcs_v1_5_sign_man_v1_5(struct image *image,
 			    struct fw_image_manifest_v1_5 *man,
@@ -181,10 +190,13 @@ extern const struct adsp machine_bdw;
 extern const struct adsp machine_apl;
 extern const struct adsp machine_cnl;
 extern const struct adsp machine_icl;
+extern const struct adsp machine_jsl;
+extern const struct adsp machine_tgl;
 extern const struct adsp machine_sue;
 extern const struct adsp machine_skl;
 extern const struct adsp machine_kbl;
 extern const struct adsp machine_imx8;
-
+extern const struct adsp machine_imx8x;
+extern const struct adsp machine_imx8m;
 
 #endif

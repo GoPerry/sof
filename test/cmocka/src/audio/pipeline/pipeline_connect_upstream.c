@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
-#include <sof/edf_schedule.h>
+#include <sof/schedule/edf_schedule.h>
 #include "pipeline_mocks.h"
 #include "pipeline_connection_mocks.h"
 #include <stdarg.h>
@@ -84,11 +84,8 @@ static void test_audio_pipeline_complete_connect_downstream_variable_set
 	/*Testing component*/
 	pipeline_complete(&result, test_data->first, test_data->second);
 
-	assert_int_equal
-	(
-	result.sched_comp->frames, test_data->p.ipc_pipe.frames_per_sched
-	);
 	assert_ptr_equal(result.sched_comp->pipeline, &result);
+	assert_ptr_equal(test_data->first->pipeline, &result);
 }
 
 /*Test going downstream ignoring sink from other pipeline*/
@@ -151,11 +148,13 @@ static void test_audio_pipeline_complete_connect_downstream_full(void **state)
 {
 	struct pipeline_connect_data *test_data = *state;
 	struct pipeline result = test_data->p;
+	struct sof_ipc_comp *comp;
 
 	cleanup_test_data(test_data);
 
 	/*Connecting first comp to second*/
-	test_data->second->comp.pipeline_id = PIPELINE_ID_SAME;
+	comp = dev_comp(test_data->second);
+	comp->pipeline_id = PIPELINE_ID_SAME;
 	list_item_append(&result.sched_comp->bsink_list,
 					 &test_data->b1->source_list);
 	test_data->b1->source = result.sched_comp;
@@ -171,10 +170,8 @@ static void test_audio_pipeline_complete_connect_downstream_full(void **state)
 	/*Testing component*/
 	pipeline_complete(&result, test_data->first, test_data->second);
 
-	assert_int_equal(test_data->first->frames,
-					 result.ipc_pipe.frames_per_sched);
-	assert_int_equal(test_data->second->frames,
-					 result.ipc_pipe.frames_per_sched);
+	assert_ptr_equal(test_data->first->pipeline, &result);
+	assert_ptr_equal(test_data->second->pipeline, &result);
 }
 
 /*Test going upstream all the way*/
@@ -182,11 +179,13 @@ static void test_audio_pipeline_complete_connect_upstream_full(void **state)
 {
 	struct pipeline_connect_data *test_data = *state;
 	struct pipeline result = test_data->p;
+	struct sof_ipc_comp *comp;
 
 	cleanup_test_data(test_data);
 
 	/*Connecting first comp to second*/
-	test_data->second->comp.pipeline_id = PIPELINE_ID_SAME;
+	comp = dev_comp(test_data->second);
+	comp->pipeline_id = PIPELINE_ID_SAME;
 	list_item_append(&result.sched_comp->bsource_list,
 					 &test_data->b1->sink_list);
 	test_data->b1->sink = test_data->first;
@@ -195,10 +194,8 @@ static void test_audio_pipeline_complete_connect_upstream_full(void **state)
 	/*Testing component*/
 	pipeline_complete(&result, test_data->first, test_data->second);
 
-	assert_int_equal(test_data->first->frames,
-					 result.ipc_pipe.frames_per_sched);
-	assert_int_equal(test_data->second->frames,
-					 result.ipc_pipe.frames_per_sched);
+	assert_ptr_equal(test_data->first->pipeline, &result);
+	assert_ptr_equal(test_data->second->pipeline, &result);
 }
 
 /*Test going upstream all the way*/
@@ -207,11 +204,13 @@ static void test_audio_pipeline_complete_connect_upstream_other_pipeline
 {
 	struct pipeline_connect_data *test_data = *state;
 	struct pipeline result = test_data->p;
+	struct sof_ipc_comp *comp;
 
 	cleanup_test_data(test_data);
 
 	/*Connecting first comp to second*/
-	test_data->second->comp.pipeline_id = PIPELINE_ID_DIFFERENT;
+	comp = dev_comp(test_data->second);
+	comp->pipeline_id = PIPELINE_ID_DIFFERENT;
 	list_item_append(&result.sched_comp->bsource_list,
 					 &test_data->b1->sink_list);
 	test_data->b1->sink = test_data->first;

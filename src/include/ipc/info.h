@@ -13,11 +13,12 @@
  * \author Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_IPC_INFO_H__
-#define __INCLUDE_UAPI_IPC_INFO_H__
+#ifndef __IPC_INFO_H__
+#define __IPC_INFO_H__
 
 #include <ipc/header.h>
 #include <ipc/stream.h>
+#include <stdint.h>
 
 /*
  * Firmware boot and version
@@ -35,8 +36,11 @@
 
 /* extended data types that can be appended onto end of sof_ipc_fw_ready */
 enum sof_ipc_ext_data {
-	SOF_IPC_EXT_DMA_BUFFER = 0,
-	SOF_IPC_EXT_WINDOW,
+	SOF_IPC_EXT_UNUSED		= 0,
+	SOF_IPC_EXT_WINDOW		= 1,
+	SOF_IPC_EXT_CC_INFO		= 2,
+	SOF_IPC_EXT_PROBE_INFO		= 3,
+	SOF_IPC_EXT_USER_ABI_INFO 	= 4,
 };
 
 /* FW version - SOF_IPC_GLB_VERSION */
@@ -89,22 +93,6 @@ struct sof_ipc_ext_data_hdr {
 	uint32_t type;		/**< SOF_IPC_EXT_ */
 } __attribute__((packed));
 
-struct sof_ipc_dma_buffer_elem {
-	struct sof_ipc_hdr hdr;
-	uint32_t type;		/**< SOF_IPC_REGION_ */
-	uint32_t id;		/**< platform specific - used to map to host memory */
-	struct sof_ipc_host_buffer buffer;
-} __attribute__((packed));
-
-/* extended data DMA buffers for IPC, trace and debug */
-struct sof_ipc_dma_buffer_data {
-	struct sof_ipc_ext_data_hdr ext_hdr;
-	uint32_t num_buffers;
-
-	/* host files in buffer[n].buffer */
-	struct sof_ipc_dma_buffer_elem buffer[];
-} __attribute__((packed));
-
 struct sof_ipc_window_elem {
 	struct sof_ipc_hdr hdr;
 	uint32_t type;		/**< SOF_IPC_REGION_ */
@@ -122,4 +110,37 @@ struct sof_ipc_window {
 	struct sof_ipc_window_elem window[];
 } __attribute__((packed));
 
-#endif
+/* extended data, compiler version */
+struct sof_ipc_cc_version {
+	struct sof_ipc_ext_data_hdr ext_hdr;
+	uint32_t major;
+	uint32_t minor;
+	uint32_t micro;
+
+	/* reserved for future use */
+	uint32_t reserved[4];
+
+	char name[16]; /* null terminated compiler name */
+	char optim[4]; /* null terminated compiler -O flag value */
+	char desc[]; /* null terminated compiler description */
+} __attribute__((packed));
+
+/* extended data: Probe setup */
+struct sof_ipc_probe_support {
+	struct sof_ipc_ext_data_hdr ext_hdr;
+
+	uint32_t probe_points_max;
+	uint32_t injection_dmas_max;
+
+	/* reserved for future use */
+	uint32_t reserved[2];
+} __attribute__((packed));
+
+/* extended data: user abi version(s) */
+struct sof_ipc_user_abi_version {
+	struct sof_ipc_ext_data_hdr ext_hdr;
+
+	uint32_t abi_dbg_version;
+} __attribute__((packed));
+
+#endif /* __IPC_INFO_H__ */

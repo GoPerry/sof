@@ -1,4 +1,33 @@
 # SPDX-License-Identifier: BSD-3-Clause
+if(TOOLCHAIN)
+	set(CROSS_COMPILE "${TOOLCHAIN}-")
+else()
+	message(FATAL_ERROR
+		" Please specify toolchain to use.\n"
+		" Examples:\n"
+		" 	1) cmake -DTOOLCHAIN=xt ...\n"
+		" 	2) cmake -DTOOLCHAIN=xtensa-apl-elf ...\n"
+	)
+endif()
+
+if(BUILD_CLANG_SCAN)
+	# scan-build has to set its own compiler,
+	# so we need to unset current one
+	message(STATUS "Reset C Compiler for scan-build")
+	set(CMAKE_C_COMPILER)
+
+	# scan-build proxies only compiler, other tools are used directly
+	find_program(CMAKE_AR NAMES "${CROSS_COMPILE}ar" PATHS ENV PATH NO_DEFAULT_PATH)
+	find_program(CMAKE_RANLIB NAMES "${CROSS_COMPILE}ranlib" PATHS ENV PATH NO_DEFAULT_PATH)
+
+	set(XCC_TOOLS_VERSION "CLANG-SCAN-BUILD")
+
+	if(TOOLCHAIN STREQUAL "xt")
+		set(XCC 1)
+	endif()
+
+	return()
+endif()
 
 message(STATUS "Preparing Xtensa toolchain")
 
@@ -17,17 +46,6 @@ set(CMAKE_C_COMPILER_ID GNU)
 # try to just compile lib instead of executable
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-if(TOOLCHAIN)
-	set(CROSS_COMPILE "${TOOLCHAIN}-")
-else()
-	message(FATAL_ERROR
-		" Please specify toolchain to use.\n"
-		" Examples:\n"
-		" 	1) cmake -DTOOLCHAIN=xt ...\n"
-		" 	2) cmake -DTOOLCHAIN=xtensa-apl-elf ...\n"
-	)
-endif()
-
 # xt toolchain only partially follows gcc convention
 if(TOOLCHAIN STREQUAL "xt")
 	set(XCC 1)
@@ -45,3 +63,21 @@ set(CMAKE_FIND_ROOT_PATH  ".")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+if(XCC)
+	# get compiler description
+	execute_process(
+		COMMAND ${CMAKE_C_COMPILER} --show-config=config
+		OUTPUT_VARIABLE cc_config_output
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_QUIET
+	)
+
+	string(REGEX MATCH "[a-zA-Z]+-[0-9]+.[0-9]+-[a-zA-Z]*" XCC_TOOLS_VERSION "${cc_config_output}")
+	if(NOT XCC_TOOLS_VERSION)
+		message(WARNING "Couldn't get compiler description from '${cc_config_output}'")
+		set(XCC_TOOLS_VERSION "UNKNOWN-${CMAKE_SYSTEM_NAME}")
+	endif()
+else()
+	string(REGEX MATCH "([^\/\\]+)$" XCC_TOOLS_VERSION "${TOOLCHAIN}")
+endif()

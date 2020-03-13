@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 if(CONFIG_SMP)
-	SET(arch_src ${PROJECT_SOURCE_DIR}/src/arch/xtensa/smp/idc.c)
+	SET(arch_src ${PROJECT_SOURCE_DIR}/src/drivers/intel/cavs/idc.c)
 
 	# make small lib for stripping so we don't have to care
 	# about unused missing references
@@ -10,6 +10,7 @@ if(CONFIG_SMP)
 	link_libraries(-Wl,--gc-sections)
 
 	add_library(pipeline_lib STATIC ${arch_src})
+	sof_append_relative_path_definitions(pipeline_lib)
 
 	target_link_libraries(pipeline_lib PRIVATE sof_options)
 
@@ -20,13 +21,7 @@ cmocka_test(pipeline_new
 	pipeline_new.c
 	pipeline_mocks.c
 	pipeline_mocks_rzalloc.c
-	${PROJECT_SOURCE_DIR}/src/audio/pipeline.c
-)
-
-cmocka_test(pipeline_new_allocation
-	pipeline_new_allocation.c
-	pipeline_mocks.c
-	pipeline_new_allocation_mocks.c
+	${PROJECT_SOURCE_DIR}/test/cmocka/src/notifier_mocks.c
 	${PROJECT_SOURCE_DIR}/src/audio/pipeline.c
 )
 
@@ -35,6 +30,7 @@ cmocka_test(pipeline_connect_upstream
 	pipeline_mocks.c
 	pipeline_mocks_rzalloc.c
 	pipeline_connection_mocks.c
+	${PROJECT_SOURCE_DIR}/test/cmocka/src/notifier_mocks.c
 	${PROJECT_SOURCE_DIR}/src/audio/pipeline.c
 )
 
@@ -43,5 +39,6 @@ cmocka_test(pipeline_free
 	pipeline_mocks.c
 	pipeline_mocks_rzalloc.c
 	pipeline_connection_mocks.c
+	${PROJECT_SOURCE_DIR}/test/cmocka/src/notifier_mocks.c
 	${PROJECT_SOURCE_DIR}/src/audio/pipeline.c
 )

@@ -6,16 +6,20 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sof/lock.h>
+#include <malloc.h>
 #include <sof/list.h>
-#include <sof/stream.h>
+#include <sof/audio/stream.h>
 #include <sof/audio/component.h>
 
 #include "comp_mock.h"
 
-static struct comp_dev *mock_comp_new(struct sof_ipc_comp *comp)
+static struct comp_dev *mock_comp_new(const struct comp_driver *drv,
+				      struct sof_ipc_comp *comp)
 {
-	return calloc(1, sizeof(struct comp_dev));
+	struct comp_dev *dev = calloc(1, sizeof(struct comp_dev));
+
+	dev->drv = drv;
+	return dev;
 }
 
 static void mock_comp_free(struct comp_dev *dev)
@@ -23,7 +27,8 @@ static void mock_comp_free(struct comp_dev *dev)
 	free(dev);
 }
 
-static int mock_comp_params(struct comp_dev *dev)
+static int mock_comp_params(struct comp_dev *dev,
+			    struct sof_ipc_stream_params *params)
 {
 	return 0;
 }
@@ -49,7 +54,7 @@ static int mock_comp_prepare(struct comp_dev *dev)
 	return 0;
 }
 
-struct comp_driver comp_mock = {
+static const struct comp_driver comp_mock = {
 	.type	= SOF_COMP_MOCK,
 	.ops	= {
 		.new		= mock_comp_new,
@@ -62,7 +67,17 @@ struct comp_driver comp_mock = {
 	},
 };
 
+static struct comp_driver_info comp_mock_info = {
+	.drv = &comp_mock,
+};
+
 void sys_comp_mock_init(void)
 {
-	comp_register(&comp_mock);
+	comp_register(&comp_mock_info);
+}
+
+int comp_verify_params(struct comp_dev *dev, uint32_t flag,
+		       struct sof_ipc_stream_params *params)
+{
+	return 0;
 }

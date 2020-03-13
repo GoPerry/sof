@@ -4,96 +4,115 @@
 //
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 
-#include <stdint.h>
-#include <stddef.h>
-#include <errno.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/alloc.h>
 #include <sof/audio/component.h>
-#include <sof/audio/pipeline.h>
+#include <sof/common.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/memory.h>
+#include <sof/list.h>
+#include <sof/sof.h>
+#include <sof/string.h>
 #include <ipc/topology.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-struct comp_data {
-	struct list_item list;		/* list of components */
-	spinlock_t lock;
-};
+static SHARED_DATA struct comp_driver_list cd;
 
-static struct comp_data *cd;
-
-static struct comp_driver *get_drv(uint32_t type)
+static const struct comp_driver *get_drv(uint32_t type)
 {
+	struct comp_driver_list *drivers = comp_drivers_get();
 	struct list_item *clist;
-	struct comp_driver *drv = NULL;
+	const struct comp_driver *drv = NULL;
+	struct comp_driver_info *info;
+	uint32_t flags;
 
-	spin_lock(&cd->lock);
+	irq_local_disable(flags);
 
 	/* search driver list for driver type */
-	list_for_item(clist, &cd->list) {
-
-		drv = container_of(clist, struct comp_driver, list);
-		if (drv->type == type)
+	list_for_item(clist, &drivers->list) {
+		info = container_of(clist, struct comp_driver_info, list);
+		if (info->drv->type == type) {
+			drv = info->drv;
+			platform_shared_commit(info, sizeof(*info));
 			goto out;
+		}
+
+		platform_shared_commit(info, sizeof(*info));
 	}
 
-	/* not found */
-	drv = NULL;
-
 out:
-	spin_unlock(&cd->lock);
+	platform_shared_commit(drivers, sizeof(*drivers));
+	irq_local_enable(flags);
 	return drv;
 }
 
 struct comp_dev *comp_new(struct sof_ipc_comp *comp)
 {
 	struct comp_dev *cdev;
-	struct comp_driver *drv;
+	const struct comp_driver *drv;
 
 	/* find the driver for our new component */
 	drv = get_drv(comp->type);
 	if (!drv) {
-		trace_comp_error("comp_new() error: driver not found, "
-				 "comp->type = %u", comp->type);
+		trace_error(TRACE_CLASS_COMP, "comp_new() error: driver not found, comp->type = %u",
+			    comp->type);
 		return NULL;
 	}
+
+	/* validate size of ipc config */
+	if (IPC_IS_SIZE_INVALID(*comp_config(comp))) {
+		IPC_SIZE_ERROR_TRACE(TRACE_CLASS_COMP, *comp_config(comp));
+		return NULL;
+	}
+
+	trace_event(TRACE_CLASS_COMP, "comp new %s type %d pipe_id %d id %d",
+		    drv->uid, comp->type, comp->pipeline_id, comp->id);
 
 	/* create the new component */
-	cdev = drv->ops.new(comp);
+	cdev = drv->ops.new(drv, comp);
 	if (!cdev) {
-		trace_comp_error("comp_new() error: "
-				 "unable to create the new component");
+		comp_cl_err(drv, "comp_new() error: unable to create the new component");
 		return NULL;
 	}
 
-	/* init component */
-	assert(!memcpy_s(&cdev->comp, sizeof(cdev->comp),
-		comp, sizeof(*comp)));
-
-	cdev->drv = drv;
-	spinlock_init(&cdev->lock);
 	list_init(&cdev->bsource_list);
 	list_init(&cdev->bsink_list);
 
 	return cdev;
 }
 
-int comp_register(struct comp_driver *drv)
+int comp_register(struct comp_driver_info *drv)
 {
-	spin_lock(&cd->lock);
-	list_item_prepend(&drv->list, &cd->list);
-	spin_unlock(&cd->lock);
+	struct comp_driver_list *drivers = comp_drivers_get();
+	uint32_t flags;
+
+	irq_local_disable(flags);
+	list_item_prepend(&drv->list, &drivers->list);
+	platform_shared_commit(drv, sizeof(*drv));
+	platform_shared_commit(drivers, sizeof(*drivers));
+	irq_local_enable(flags);
 
 	return 0;
 }
 
-void comp_unregister(struct comp_driver *drv)
+void comp_unregister(struct comp_driver_info *drv)
 {
-	spin_lock(&cd->lock);
+	uint32_t flags;
+
+	irq_local_disable(flags);
 	list_item_del(&drv->list);
-	spin_unlock(&cd->lock);
+	platform_shared_commit(drv, sizeof(*drv));
+	irq_local_enable(flags);
 }
+
+/* NOTE: Keep the component state diagram up to date:
+ * sof-docs/developer_guides/firmware/components/images/comp-dev-states.pu
+ */
 
 int comp_set_state(struct comp_dev *dev, int cmd)
 {
@@ -101,8 +120,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 	int ret = 0;
 
 	if (dev->state == requested_state) {
-		trace_comp("comp_set_state(), state already set to %u",
-			   dev->state);
+		comp_info(dev, "comp_set_state(), state already set to %u",
+			  dev->state);
 		return COMP_STATUS_STATE_ALREADY_SET;
 	}
 
@@ -111,9 +130,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		if (dev->state == COMP_STATE_PREPARE) {
 			dev->state = COMP_STATE_ACTIVE;
 		} else {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_START", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_START",
+				 dev->state);
 			ret = -EINVAL;
 		}
 		break;
@@ -121,9 +139,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		if (dev->state == COMP_STATE_PAUSED) {
 			dev->state = COMP_STATE_ACTIVE;
 		} else {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_RELEASE", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_RELEASE",
+				 dev->state);
 			ret = -EINVAL;
 		}
 		break;
@@ -132,9 +149,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		    dev->state == COMP_STATE_PAUSED) {
 			dev->state = COMP_STATE_PREPARE;
 		} else {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_STOP", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_STOP",
+				 dev->state);
 			ret = -EINVAL;
 		}
 		break;
@@ -147,9 +163,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		if (dev->state == COMP_STATE_ACTIVE) {
 			dev->state = COMP_STATE_PAUSED;
 		} else {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_PAUSE", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_PAUSE",
+				 dev->state);
 			ret = -EINVAL;
 		}
 		break;
@@ -157,9 +172,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		/* reset always succeeds */
 		if (dev->state == COMP_STATE_ACTIVE ||
 		    dev->state == COMP_STATE_PAUSED) {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_RESET", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_RESET",
+				 dev->state);
 			ret = 0;
 		}
 		dev->state = COMP_STATE_READY;
@@ -168,9 +182,8 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 		if (dev->state == COMP_STATE_READY) {
 			dev->state = COMP_STATE_PREPARE;
 		} else {
-			trace_comp_error("comp_set_state() error: "
-					 "wrong state = %u, "
-					 "COMP_TRIGGER_PREPARE", dev->state);
+			comp_err(dev, "comp_set_state() error: wrong state = %u, COMP_TRIGGER_PREPARE",
+				 dev->state);
 			ret = -EINVAL;
 		}
 		break;
@@ -181,44 +194,151 @@ int comp_set_state(struct comp_dev *dev, int cmd)
 	return ret;
 }
 
-void sys_comp_init(void)
+void sys_comp_init(struct sof *sof)
 {
-	cd = rzalloc(RZONE_SYS, SOF_MEM_CAPS_RAM, sizeof(*cd));
-	list_init(&cd->list);
-	spinlock_init(&cd->lock);
+	sof->comp_drivers = platform_shared_get(&cd, sizeof(cd));
+
+	list_init(&sof->comp_drivers->list);
+
+	platform_shared_commit(sof->comp_drivers, sizeof(*sof->comp_drivers));
 }
 
-int comp_get_copy_limits(struct comp_dev *dev, struct comp_copy_limits *cl)
+void comp_get_copy_limits(struct comp_buffer *source, struct comp_buffer *sink,
+			  struct comp_copy_limits *cl)
 {
-	/* Get source and sink buffer addresses */
-	cl->source = list_first_item(&dev->bsource_list, struct comp_buffer,
-				     sink_list);
-	cl->sink = list_first_item(&dev->bsink_list, struct comp_buffer,
-				   source_list);
-
-	/* check for underrun */
-	if (cl->source->avail == 0) {
-		trace_comp_error("comp_get_copy_limits() error: "
-				 "source component buffer"
-				 " has not enough data available");
-		comp_underrun(dev, cl->source, 0, 0);
-		return -EIO;
-	}
-
-	/* check for overrun */
-	if (cl->sink->free == 0) {
-		trace_comp_error("comp_get_copy_limits() error: "
-				 "sink component buffer"
-				 " has not enough free bytes for copy");
-		comp_overrun(dev, cl->sink, 0, 0);
-		return -EIO;
-	}
-
-	cl->frames = comp_avail_frames(cl->source, cl->sink);
-	cl->source_frame_bytes = comp_frame_bytes(cl->source->source);
-	cl->sink_frame_bytes = comp_frame_bytes(cl->sink->sink);
+	cl->frames = audio_stream_avail_frames(&source->stream, &sink->stream);
+	cl->source_frame_bytes = audio_stream_frame_bytes(&source->stream);
+	cl->sink_frame_bytes = audio_stream_frame_bytes(&sink->stream);
 	cl->source_bytes = cl->frames * cl->source_frame_bytes;
 	cl->sink_bytes = cl->frames * cl->sink_frame_bytes;
+}
+
+/* Function overwrites PCM parameters (frame_fmt, buffer_fmt, channels, rate)
+ * with buffer parameters when specific flag is set.
+ */
+static void comp_update_params(uint32_t flag,
+			       struct sof_ipc_stream_params *params,
+			       struct comp_buffer *buffer)
+{
+	if (flag & BUFF_PARAMS_FRAME_FMT)
+		params->frame_fmt = buffer->stream.frame_fmt;
+
+	if (flag & BUFF_PARAMS_BUFFER_FMT)
+		params->buffer_fmt = buffer->buffer_fmt;
+
+	if (flag & BUFF_PARAMS_CHANNELS)
+		params->channels = buffer->stream.channels;
+
+	if (flag & BUFF_PARAMS_RATE)
+		params->rate = buffer->stream.rate;
+}
+
+int comp_verify_params(struct comp_dev *dev, uint32_t flag,
+		       struct sof_ipc_stream_params *params)
+{
+	struct list_item *buffer_list;
+	struct list_item *source_list;
+	struct list_item *sink_list;
+	struct list_item *clist;
+	struct list_item *curr;
+	struct comp_buffer *sinkb;
+	struct comp_buffer *buf;
+	int dir = dev->direction;
+	uint32_t flags = 0;
+
+	if (!params) {
+		comp_err(dev, "comp_verify_params() error: !params");
+		return -EINVAL;
+	}
+
+	source_list = comp_buffer_list(dev, PPL_DIR_UPSTREAM);
+	sink_list = comp_buffer_list(dev, PPL_DIR_DOWNSTREAM);
+
+	/* searching for endpoint component e.g. HOST, DETECT_TEST, which
+	 * has only one sink or one source buffer.
+	 */
+	if (list_is_empty(source_list) != list_is_empty(sink_list)) {
+		if (!list_is_empty(source_list))
+			buf = list_first_item(&dev->bsource_list,
+					      struct comp_buffer,
+					      sink_list);
+		else
+			buf = list_first_item(&dev->bsink_list,
+					      struct comp_buffer,
+					      source_list);
+
+		buffer_lock(buf, &flags);
+
+		/* update specific pcm parameter with buffer parameter if
+		 * specific flag is set.
+		 */
+		comp_update_params(flag, params, buf);
+
+		/* overwrite buffer parameters with modified pcm
+		 * parameters
+		 */
+		buffer_set_params(buf, params, BUFFER_UPDATE_FORCE);
+
+		/* set component period frames */
+		component_set_period_frames(dev, buf->stream.rate);
+
+		buffer_unlock(buf, flags);
+	} else {
+		/* for other components we iterate over all downstream buffers
+		 * (for playback) or upstream buffers (for capture).
+		 */
+		buffer_list = comp_buffer_list(dev, dir);
+		clist = buffer_list->next;
+
+		while (clist != buffer_list) {
+			curr = clist;
+
+			buf = buffer_from_list(curr, struct comp_buffer, dir);
+
+			buffer_lock(buf, &flags);
+
+			clist = clist->next;
+
+			comp_update_params(flag, params, buf);
+
+			buffer_set_params(buf, params, BUFFER_UPDATE_FORCE);
+
+			buffer_unlock(buf, flags);
+		}
+
+		/* fetch sink buffer in order to calculate period frames */
+		sinkb = list_first_item(&dev->bsink_list, struct comp_buffer,
+					source_list);
+
+		buffer_lock(sinkb, &flags);
+
+		component_set_period_frames(dev, sinkb->stream.rate);
+
+		buffer_unlock(sinkb, flags);
+	}
 
 	return 0;
+}
+
+struct comp_dev *comp_make_shared(struct comp_dev *dev)
+{
+	struct comp_dev *old = dev;
+
+	dev = rrealloc(dev, SOF_MEM_ZONE_RUNTIME, SOF_MEM_FLAG_SHARED,
+		       SOF_MEM_CAPS_RAM, dev->size);
+	if (!dev) {
+		trace_error(TRACE_CLASS_COMP, "comp_make_shared() error: unable to realloc component");
+		return NULL;
+	}
+
+	list_init(&dev->bsource_list);
+	list_init(&dev->bsink_list);
+	dev->is_shared = true;
+
+	platform_shared_commit(dev, sizeof(*dev));
+
+	/* clear cache to avoid later random flushes */
+	dcache_invalidate_region(old, sizeof(*old));
+
+	return dev;
 }

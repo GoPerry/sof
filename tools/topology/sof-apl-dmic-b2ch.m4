@@ -29,13 +29,16 @@ include(`platform/intel/dmic.m4')
 
 dnl PIPELINE_PCM_ADD(pipeline,
 dnl     pipe id, pcm, max channels, format,
-dnl     frames, deadline, priority, core)
+dnl     period, priority, core,
+dnl     pcm_min_rate, pcm_max_rate, pipeline_rate,
+dnl     time_domain, sched_comp)
 
 # Passthrough capture pipeline 7 on PCM 7 using max channels 2.
-# Schedule 48 frames per 1000us deadline on core 0 with priority 0
+# Set 1000us deadline on core 0 with priority 0
 PIPELINE_PCM_ADD(sof/pipe-volume-capture-16khz.m4,
 	7, 7, 2, s32le,
-	48, 1000, 0, 0)
+	1000, 0, 0,
+	16000, 16000, 16000)
 
 #
 # DAIs configuration
@@ -44,19 +47,19 @@ PIPELINE_PCM_ADD(sof/pipe-volume-capture-16khz.m4,
 dnl DAI_ADD(pipeline,
 dnl     pipe id, dai type, dai_index, dai_be,
 dnl     buffer, periods, format,
-dnl     frames, deadline, priority, core)
+dnl     deadline, priority, core, time_domain)
 
 # capture DAI is DMIC 1 using 2 periods
-# Buffers use s32le format, with 48 frame per 1000us on core 0 with priority 0
+# Buffers use s32le format, 1000us deadline on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-capture.m4,
 	7, DMIC, 1, NoCodec-7,
 	PIPELINE_SINK_7, 2, s32le,
-	48, 1000, 0, 0)
+	1000, 0, 0, SCHEDULE_TIME_DOMAIN_TIMER)
 
 
 dnl PCM_DUPLEX_ADD(name, pcm_id, playback, capture)
 dnl PCM_CAPTURE_ADD(name, pipeline, capture)
-PCM_CAPTURE_ADD(DMIC16k, 7, PIPELINE_PCM_7)
+PCM_CAPTURE_ADD(DMIC16kHz, 7, PIPELINE_PCM_7)
 
 #
 # BE configurations - overrides config in ACPI if present
@@ -66,11 +69,8 @@ dnl DAI_CONFIG(type, dai_index, link_id, name, ssp_config/dmic_config)
 
 DAI_CONFIG(DMIC, 1, 7, NoCodec-7,
 	   dnl DMIC_CONFIG(driver_version, clk_min, clk_mac, duty_min, duty_max,
-	   dnl		   sample_rate, fifo word length, type, dai_index,
-	   dnl             pdm controller config)
+	   dnl		   sample_rate, fifo word length, unmute time, type,
+	   dnl		   dai_index, pdm controller config)
 	   DMIC_CONFIG(1, 500000, 4800000, 40, 60, 16000,
-		dnl DMIC_WORD_LENGTH(frame_format)
-		DMIC_WORD_LENGTH(s32le), DMIC, 1,
-		dnl PDM_CONFIG(type, dai_index, num pdm active, pdm tuples list)
-		dnl STEREO_PDM0 is a pre-defined pdm config for stereo capture
+		DMIC_WORD_LENGTH(s32le), 400, DMIC, 1,
 		PDM_CONFIG(DMIC, 1, STEREO_PDM1)))

@@ -12,6 +12,18 @@ TRACE_IMPL()
 
 struct ipc *_ipc;
 struct timer *platform_timer;
+struct schedulers *schedulers;
+static struct sof sof;
+
+struct sof *sof_get(void)
+{
+	return &sof;
+}
+
+struct schedulers **arch_schedulers_get(void)
+{
+	return &schedulers;
+}
 
 void platform_dai_timestamp(struct comp_dev *dai,
 	struct sof_ipc_stream_posn *posn)
@@ -20,41 +32,25 @@ void platform_dai_timestamp(struct comp_dev *dai,
 	(void)posn;
 }
 
-void schedule_task_free(struct task *task)
-{
-	(void)task;
-	task->state = SOF_TASK_STATE_FREE;
-	task->func = NULL;
-	task->data = NULL;
-}
-
-void schedule_task(struct task *task, uint64_t start, uint64_t deadline,
-		   uint32_t flags)
-{
-	(void)task;
-	(void)start;
-	(void)deadline;
-	(void)flags;
-}
-
 int schedule_task_init(struct task *task, uint16_t type, uint16_t priority,
-		       uint64_t (*func)(void *data), void *data, uint16_t core,
-		       uint32_t xflags)
+		       enum task_state (*run)(void *data), void *data,
+		       uint16_t core, uint32_t flags)
 {
 	(void)task;
 	(void)type;
 	(void)priority;
-	(void)func;
+	(void)run;
 	(void)data;
 	(void)core;
-	(void)xflags;
+	(void)flags;
 
 	return 0;
 }
 
-int schedule_task_cancel(struct task *task)
+int schedule_task_init_ll(struct task *task, uint16_t type, uint16_t priority,
+			  enum task_state (*run)(void *data), void *data,
+			  uint16_t core, uint32_t flags)
 {
-	(void)task;
 	return 0;
 }
 
@@ -76,16 +72,11 @@ int ipc_stream_send_xrun(struct comp_dev *cdev,
 	return 0;
 }
 
-int arch_cpu_is_core_enabled(int id)
-{
-	return 1;
-}
-
 void cpu_power_down_core(void) { }
 
 void notifier_notify(void) { }
 
-struct ipc_comp_dev *ipc_get_comp(struct ipc *ipc, uint32_t id)
+struct ipc_comp_dev *ipc_get_comp_by_id(struct ipc *ipc, uint32_t id)
 {
 	(void)ipc;
 	(void)id;
@@ -93,16 +84,19 @@ struct ipc_comp_dev *ipc_get_comp(struct ipc *ipc, uint32_t id)
 	return NULL;
 }
 
+struct ipc_comp_dev *ipc_get_comp_by_ppl_id(struct ipc *ipc, uint16_t type,
+					    uint32_t ppl_id)
+{
+	(void)ipc;
+	(void)type;
+	(void)ppl_id;
+
+	return NULL;
+}
+
 void heap_trace_all(int force)
 {
 	(void)force;
-}
-
-void __panic(uint32_t p, char *filename, uint32_t linenum)
-{
-	(void)p;
-	(void)filename;
-	(void)linenum;
 }
 
 uint64_t platform_timer_get(struct timer *timer)
@@ -118,4 +112,11 @@ uint64_t clock_ms_to_ticks(int clock, uint64_t ms)
 	(void)ms;
 
 	return 0;
+}
+
+void ipc_msg_send(struct ipc_msg *msg, void *data, bool high_priority)
+{
+	(void)msg;
+	(void)data;
+	(void)high_priority;
 }

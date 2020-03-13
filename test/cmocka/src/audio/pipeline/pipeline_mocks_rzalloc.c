@@ -6,17 +6,19 @@
 
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
-#include <sof/edf_schedule.h>
+#include <sof/schedule/edf_schedule.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
 #include <stdint.h>
+#include <malloc.h>
 #include <cmocka.h>
-#include <sof/alloc.h>
+#include <sof/lib/alloc.h>
 
-void *rzalloc(int zone, uint32_t caps, size_t bytes)
+void *rzalloc(enum mem_zone zone, uint32_t flags, uint32_t caps, size_t bytes)
 {
 	(void)zone;
+	(void)flags;
 	(void)caps;
 	return calloc(bytes, 1);
 }

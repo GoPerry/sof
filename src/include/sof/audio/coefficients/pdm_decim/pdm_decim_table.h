@@ -7,7 +7,12 @@
 
 /* PDM decimation FIR filters */
 
+#ifndef __SOF_AUDIO_COEFFICIENTS_PDM_DECIM_PDM_DECIM_TABLE_H__
+#define __SOF_AUDIO_COEFFICIENTS_PDM_DECIM_PDM_DECIM_TABLE_H__
+
 #include "pdm_decim_fir.h"
+#include <config.h>
+#include <stddef.h>
 
 #if CONFIG_CAVS_DMIC_FIR_DECIMATE_BY_2
 #include "pdm_decim_int32_02_4288_5100_010_095.h"
@@ -28,6 +33,9 @@
 #endif
 #if CONFIG_CAVS_DMIC_FIR_DECIMATE_BY_8
 #include "pdm_decim_int32_08_4156_5380_010_090.h"
+#endif
+#if CONFIG_CAVS_DMIC_FIR_DECIMATE_BY_12
+#include "pdm_decim_int32_12_4156_6018_010_090.h"
 #endif
 
 /* Note: Higher spec filter must be before lower spec filter
@@ -56,5 +64,10 @@ struct pdm_decim *fir_list[] = {
 #if CONFIG_CAVS_DMIC_FIR_DECIMATE_BY_8
 	&pdm_decim_int32_08_4156_5380_010_090,
 #endif
+#if CONFIG_CAVS_DMIC_FIR_DECIMATE_BY_12
+	&pdm_decim_int32_12_4156_6018_010_090,
+#endif
 	NULL, /* This marks the end of coefficients */
 };
+
+#endif /* __SOF_AUDIO_COEFFICIENTS_PDM_DECIM_PDM_DECIM_TABLE_H__ */

@@ -6,8 +6,8 @@
  *         Artur Kloniecki <arturx.kloniecki@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_USER_TRACE_H__
-#define __INCLUDE_UAPI_USER_TRACE_H__
+#ifndef __USER_TRACE_H__
+#define __USER_TRACE_H__
 
 #include <stdint.h>
 
@@ -30,39 +30,51 @@ struct system_time {
 #define TRACE_CLASS_IRQ		(1 << 24)
 #define TRACE_CLASS_IPC		(2 << 24)
 #define TRACE_CLASS_PIPE	(3 << 24)
-#define TRACE_CLASS_HOST	(4 << 24)
+#define _TRACE_UNUSED_4		(4 << 24)
 #define TRACE_CLASS_DAI		(5 << 24)
 #define TRACE_CLASS_DMA		(6 << 24)
-#define TRACE_CLASS_SSP		(7 << 24)
+#define _TRACE_UNUSED_7		(7 << 24)
 #define TRACE_CLASS_COMP	(8 << 24)
 #define TRACE_CLASS_WAIT	(9 << 24)
 #define TRACE_CLASS_LOCK	(10 << 24)
 #define TRACE_CLASS_MEM		(11 << 24)
-#define TRACE_CLASS_MIXER	(12 << 24)
+#define _TRACE_UNUSED_12	(12 << 24)
 #define TRACE_CLASS_BUFFER	(13 << 24)
-#define TRACE_CLASS_VOLUME	(14 << 24)
-#define TRACE_CLASS_SWITCH	(15 << 24)
-#define TRACE_CLASS_MUX		(16 << 24)
-#define TRACE_CLASS_SRC         (17 << 24)
-#define TRACE_CLASS_TONE        (18 << 24)
-#define TRACE_CLASS_EQ_FIR      (19 << 24)
-#define TRACE_CLASS_EQ_IIR      (20 << 24)
+#define _TRACE_UNUSED_14	(14 << 24)
+#define _TRACE_UNUSED_15	(15 << 24)
+#define _TRACE_UNUSED_16	(16 << 24)
+#define _TRACE_UNUSED_17	(17 << 24)
+#define _TRACE_UNUSED_18	(18 << 24)
+#define _TRACE_UNUSED_19	(19 << 24)
+#define _TRACE_UNUSED_20	(20 << 24)
 #define TRACE_CLASS_SA		(21 << 24)
-#define TRACE_CLASS_DMIC	(22 << 24)
+#define _TRACE_UNUSED_22	(22 << 24)
 #define TRACE_CLASS_POWER	(23 << 24)
 #define TRACE_CLASS_IDC		(24 << 24)
 #define TRACE_CLASS_CPU		(25 << 24)
+#define TRACE_CLASS_CLK		(26 << 24)
 #define TRACE_CLASS_EDF		(27 << 24)
-#define TRACE_CLASS_KPB		(28 << 24)
-#define TRACE_CLASS_SELECTOR	(29 << 24)
+#define _TRACE_UNUSED_28	(28 << 24)
+#define _TRACE_UNUSED_29	(29 << 24)
 #define TRACE_CLASS_SCHEDULE	(30 << 24)
 #define TRACE_CLASS_SCHEDULE_LL	(31 << 24)
+#define _TRACE_UNUSED_32	(32 << 24)
+#define _TRACE_UNUSED_33	(33 << 24)
+#define TRACE_CLASS_CHMAP	(34 << 24)
+#define _TRACE_UNUSED_35	(35 << 24)
+#define TRACE_CLASS_NOTIFIER	(36 << 24)
+#define TRACE_CLASS_MN		(37 << 24)
+#define TRACE_CLASS_PROBE	(38 << 24)
 
 #define LOG_ENABLE		1  /* Enable logging */
 #define LOG_DISABLE		0  /* Disable logging */
 
 #define LOG_LEVEL_CRITICAL	1  /* (FDK fatal) */
-#define LOG_LEVEL_VERBOSE	2
+#define LOG_LEVEL_ERROR		LOG_LEVEL_CRITICAL
+#define LOG_LEVEL_WARNING	2
+#define LOG_LEVEL_INFO		3
+#define LOG_LEVEL_DEBUG		4
+#define LOG_LEVEL_VERBOSE	LOG_LEVEL_DEBUG
 
 /*
  * Layout of a log fifo.
@@ -89,12 +101,13 @@ struct log_buffer_status {
  * Number of arguments is specified by the params_num field of log_entry
  */
 struct log_entry_header {
-	uint32_t id_0 : TRACE_ID_LENGTH;	/* e.g. Pipeline ID */
-	uint32_t id_1 : TRACE_ID_LENGTH;	/* e.g. Component ID */
-	uint32_t core_id : 8;		/* Reporting core's id */
+	uint32_t uid;
+	uint32_t id_0 : TRACE_ID_LENGTH; /* e.g. Pipeline ID */
+	uint32_t id_1 : TRACE_ID_LENGTH; /* e.g. Component ID */
+	uint32_t core_id : 8;		 /* Reporting core's id */
 
-	uint64_t timestamp;		/* Timestamp (in dsp ticks) */
-	uint32_t log_entry_address;	/* Address of log entry in ELF */
+	uint64_t timestamp;		 /* Timestamp (in dsp ticks) */
+	uint32_t log_entry_address;	 /* Address of log entry in ELF */
 } __attribute__((packed));
 
-#endif //#ifndef __INCLUDE_LOGGING__
+#endif /* __USER_TRACE_H__ */

@@ -4,22 +4,17 @@
 //
 // Author: Guennadi Liakhovetski <guennadi.liakhovetski@linux.intel.com>
 
+#include <sof/drivers/gpio.h>
+#include <sof/drivers/iomux.h>
+#include <sof/lib/io.h>
+#include <sof/lib/memory.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include <sof/gpio.h>
-#include <sof/io.h>
-#include <sof/iomux.h>
-
-#include <platform/memory.h>
-#include <platform/platform.h>
-
 #define PORTA_DAT_REG	0x00
 #define PORTA_DIR_REG	0x04
 #define PORTA_CTL_REG	0x08
-
-struct iomux;
 
 struct gpio {
 	uint32_t base;
@@ -40,7 +35,7 @@ int gpio_write(const struct gpio *gpio, unsigned int port,
 
 int gpio_read(const struct gpio *gpio, unsigned int port)
 {
-	return (io_reg_read(gpio->base + PORTA_DAT_REG) >> port) & 1 ?
+	return ((io_reg_read(gpio->base + PORTA_DAT_REG) >> port) & 1) ?
 		GPIO_LEVEL_HIGH : GPIO_LEVEL_LOW;
 }
 

@@ -13,73 +13,40 @@
  * \authors Lech Betlej <lech.betlej@linux.intel.com>
  */
 
-#include <stddef.h>
-#include <errno.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/alloc.h>
-#include <sof/clk.h>
-#include <sof/ipc.h>
+#include <sof/audio/component.h>
+#include <sof/audio/pipeline.h>
 #include <sof/audio/selector.h>
-#include <sof/math/numbers.h>
+#include <sof/common.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/ipc.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/uuid.h>
+#include <sof/list.h>
+#include <sof/string.h>
+#include <sof/trace/trace.h>
+#include <ipc/control.h>
+#include <ipc/stream.h>
+#include <ipc/topology.h>
+#include <kernel/abi.h>
+#include <user/trace.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 
-/**
- * \brief Validates channel count and index and sets channel count.
- * \details If input data is not supported trace error is displayed and
- * \details input data is modified to safe values.
- * \param[in,out] cd Selector component private data.
- * \param[in] in_channels Number of input channels to the module.
- * \param[in] out_channels Number of output channels to the module.
- * \param[in] ch_idx Index of a channel to be provided on output.
- * \return Status.
- */
-static int sel_set_channel_values(struct comp_data *cd, uint32_t in_channels,
-				  uint32_t out_channels, uint32_t ch_idx)
-{
-	/* verify input channels */
-	if (in_channels != SEL_SOURCE_2CH && in_channels != SEL_SOURCE_4CH) {
-		trace_selector_error("sel_set_channel_values() error: "
-				     "in_channels = %u", in_channels);
-		return -EINVAL;
-	}
+static const struct comp_driver comp_selector;
 
-	/* verify output channels */
-	if (out_channels != SEL_SINK_1CH && out_channels != SEL_SINK_2CH &&
-	    out_channels != SEL_SINK_4CH) {
-		trace_selector_error("sel_set_channel_values() error: "
-				     "out_channels = %u", out_channels);
-		return -EINVAL;
-	}
-
-	/* verify proper channels for passthrough mode */
-	if (out_channels != SEL_SINK_1CH && in_channels != out_channels) {
-		trace_selector_error("sel_set_channel_values() error: "
-				     "in_channels = %u, out_channels = %u",
-				     in_channels, out_channels);
-		return -EINVAL;
-	}
-
-	if (ch_idx > (SEL_SOURCE_4CH - 1)) {
-		trace_selector_error("sel_set_channel_values() error: "
-				     "ch_idx = %u", in_channels);
-		return -EINVAL;
-	}
-
-	cd->config.in_channels_count = in_channels;
-	cd->config.out_channels_count = out_channels;
-	cd->config.sel_channel = ch_idx;
-
-	return 0;
-}
+/* 55a88ed5-3d18-46ca-88f1-0ee6eae9930f */
+DECLARE_SOF_UUID("selector", selector_uuid, 0x55a88ed5, 0x3d18, 0x46ca,
+		 0x88, 0xf1, 0x0e, 0xe6, 0xea, 0xe9, 0x93, 0x0f);
 
 /**
  * \brief Creates selector component.
  * \param[in,out] data Selector base component device.
  * \return Pointer to selector base component device.
  */
-static struct comp_dev *selector_new(struct sof_ipc_comp *comp)
+static struct comp_dev *selector_new(const struct comp_driver *drv,
+				     struct sof_ipc_comp *comp)
 {
 	struct sof_ipc_comp_process *ipc_process =
 		(struct sof_ipc_comp_process *)comp;
@@ -88,22 +55,22 @@ static struct comp_dev *selector_new(struct sof_ipc_comp *comp)
 	struct comp_data *cd;
 	int ret;
 
-	trace_selector("selector_new()");
+	comp_cl_info(&comp_selector, "selector_new()");
 
-	if (IPC_IS_SIZE_INVALID(ipc_process->config)) {
-		IPC_SIZE_ERROR_TRACE(TRACE_CLASS_SELECTOR, ipc_process->config);
-		return NULL;
-	}
-
-	dev = rzalloc(RZONE_RUNTIME, SOF_MEM_CAPS_RAM,
+	dev = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
 		      COMP_SIZE(struct sof_ipc_comp_process));
 	if (!dev)
 		return NULL;
+	dev->drv = drv;
 
-	assert(!memcpy_s(&dev->comp, sizeof(struct sof_ipc_comp_process), comp,
-			 sizeof(struct sof_ipc_comp_process)));
+	dev->size = COMP_SIZE(struct sof_ipc_comp_process);
 
-	cd = rzalloc(RZONE_RUNTIME, SOF_MEM_CAPS_RAM, sizeof(*cd));
+	ret = memcpy_s(COMP_GET_IPC(dev, sof_ipc_comp_process),
+		       sizeof(struct sof_ipc_comp_process), comp,
+		       sizeof(struct sof_ipc_comp_process));
+	assert(!ret);
+
+	cd = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM, sizeof(*cd));
 	if (!cd) {
 		rfree(dev);
 		return NULL;
@@ -111,18 +78,8 @@ static struct comp_dev *selector_new(struct sof_ipc_comp *comp)
 
 	comp_set_drvdata(dev, cd);
 
-	assert(!memcpy_s(&cd->config, sizeof(cd->config), ipc_process->data,
-			 bs));
-
-	/* verification of initial parameters */
-	ret = sel_set_channel_values(cd, cd->config.in_channels_count,
-				     cd->config.out_channels_count,
-				     cd->config.sel_channel);
-	if (ret < 0) {
-		rfree(cd);
-		rfree(dev);
-		return NULL;
-	}
+	ret = memcpy_s(&cd->config, sizeof(cd->config), ipc_process->data, bs);
+	assert(!ret);
 
 	dev->state = COMP_STATE_READY;
 	return dev;
@@ -136,10 +93,122 @@ static void selector_free(struct comp_dev *dev)
 {
 	struct comp_data *cd = comp_get_drvdata(dev);
 
-	trace_selector("selector_free()");
+	comp_info(dev, "selector_free()");
 
 	rfree(cd);
 	rfree(dev);
+}
+
+static int selector_verify_params(struct comp_dev *dev,
+				  struct sof_ipc_stream_params *params)
+{
+	struct comp_data *cd = comp_get_drvdata(dev);
+	struct comp_buffer *buffer;
+	struct comp_buffer *sinkb;
+	uint32_t in_channels;
+	uint32_t out_channels;
+	uint32_t flags = 0;
+
+	comp_dbg(dev, "selector_verify_params()");
+
+	sinkb = list_first_item(&dev->bsink_list, struct comp_buffer,
+				source_list);
+
+	/* check whether params->channels (received from driver) are equal to
+	 * cd->config.in_channels_count (PLAYBACK) or
+	 * cd->config.out_channels_count (CAPTURE) set during creating selector
+	 * component in selector_new() or in selector_ctrl_set_data().
+	 * cd->config.in/out_channels_count = 0 means that it can vary.
+	 */
+	if (dev->direction == SOF_IPC_STREAM_PLAYBACK) {
+		/* fetch sink buffer for playback */
+		buffer = list_first_item(&dev->bsink_list, struct comp_buffer,
+					 source_list);
+		if (cd->config.in_channels_count &&
+		    cd->config.in_channels_count != params->channels) {
+			comp_err(dev, "selector_verify_params() error: src in_channels_count does not match pcm channels");
+			return -EINVAL;
+		}
+		in_channels = cd->config.in_channels_count;
+
+		buffer_lock(buffer, &flags);
+
+		/* if cd->config.out_channels_count are equal to 0
+		 * (it can vary), we set params->channels to sink buffer
+		 * channels, which were previosly set in
+		 * pipeline_comp_hw_params()
+		 */
+		out_channels = cd->config.out_channels_count ?
+			cd->config.out_channels_count : buffer->stream.channels;
+		params->channels = out_channels;
+	} else {
+		/* fetch source buffer for capture */
+		buffer = list_first_item(&dev->bsource_list, struct comp_buffer,
+					 sink_list);
+		if (cd->config.out_channels_count &&
+		    cd->config.out_channels_count != params->channels) {
+			comp_err(dev, "selector_verify_params() error: src in_channels_count does not match pcm channels");
+			return -EINVAL;
+		}
+		out_channels = cd->config.out_channels_count;
+
+		buffer_lock(buffer, &flags);
+
+		/* if cd->config.in_channels_count are equal to 0
+		 * (it can vary), we set params->channels to source buffer
+		 * channels, which were previosly set in
+		 * pipeline_comp_hw_params()
+		 */
+		in_channels = cd->config.in_channels_count ?
+			cd->config.in_channels_count : buffer->stream.channels;
+		params->channels = in_channels;
+	}
+
+	/* Set buffer params */
+	buffer_set_params(buffer, params, BUFFER_UPDATE_FORCE);
+
+	/* set component period frames */
+	component_set_period_frames(dev, sinkb->stream.rate);
+
+	buffer_unlock(buffer, flags);
+
+	/* verify input channels */
+	switch (in_channels) {
+	case SEL_SOURCE_2CH:
+	case SEL_SOURCE_4CH:
+		break;
+	default:
+		comp_err(dev, "selector_verify_params() error: in_channels = %u"
+			 , in_channels);
+		return -EINVAL;
+	}
+
+	/* verify output channels */
+	switch (out_channels) {
+	case SEL_SINK_1CH:
+		break;
+	case SEL_SINK_2CH:
+	case SEL_SINK_4CH:
+		/* verify proper channels for passthrough mode */
+		if (in_channels != out_channels) {
+			comp_err(dev, "selector_verify_params() error: in_channels = %u, out_channels = %u"
+				 , in_channels, out_channels);
+			return -EINVAL;
+		}
+		break;
+	default:
+		comp_err(dev, "selector_verify_params() error: out_channels = %u"
+			 , out_channels);
+		return -EINVAL;
+	}
+
+	if (cd->config.sel_channel > (SEL_SOURCE_4CH - 1)) {
+		comp_err(dev, "selector_verify_params() error: ch_idx = %u"
+			 , cd->config.sel_channel);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 /**
@@ -149,19 +218,20 @@ static void selector_free(struct comp_dev *dev)
  *
  * All done in prepare since we need to know source and sink component params.
  */
-static int selector_params(struct comp_dev *dev)
+static int selector_params(struct comp_dev *dev,
+			   struct sof_ipc_stream_params *params)
 {
-	struct comp_data *cd = comp_get_drvdata(dev);
+	int err;
 
-	trace_selector("selector_params()");
+	comp_info(dev, "selector_params()");
 
-	/* rewrite channels number for other components */
-	if (dev->params.direction == SOF_IPC_STREAM_PLAYBACK)
-		dev->params.channels = cd->config.out_channels_count;
-	else
-		dev->params.channels = cd->config.in_channels_count;
+	err = selector_verify_params(dev, params);
+	if (err < 0) {
+		comp_err(dev, "selector_params(): pcm params verification failed.");
+		return -EINVAL;
+	}
 
-	return PPL_STATUS_PATH_STOP;
+	return 0;
 }
 
 /**
@@ -179,17 +249,19 @@ static int selector_ctrl_set_data(struct comp_dev *dev,
 
 	switch (cdata->cmd) {
 	case SOF_CTRL_CMD_BINARY:
-		trace_selector("selector_ctrl_set_data(), SOF_CTRL_CMD_BINARY");
+		comp_info(dev, "selector_ctrl_set_data(), SOF_CTRL_CMD_BINARY");
 
-		cfg = (struct sof_sel_config *)cdata->data->data;
-		/* Just copy the configuration & verify input params.*/
-		ret = sel_set_channel_values(cd, cfg->in_channels_count,
-					     cfg->out_channels_count,
-					     cfg->sel_channel);
+		cfg = (struct sof_sel_config *)
+		      ASSUME_ALIGNED(cdata->data->data, 4);
+
+		/* Just set the configuration */
+		cd->config.in_channels_count = cfg->in_channels_count;
+		cd->config.out_channels_count = cfg->out_channels_count;
+		cd->config.sel_channel = cfg->sel_channel;
 		break;
 	default:
-		trace_selector_error("selector_ctrl_set_cmd() error: "
-				     "invalid cdata->cmd = %u", cdata->cmd);
+		comp_err(dev, "selector_ctrl_set_cmd() error: invalid cdata->cmd = %u",
+			 cdata->cmd);
 		ret = -EINVAL;
 		break;
 	}
@@ -213,20 +285,20 @@ static int selector_ctrl_get_data(struct comp_dev *dev,
 
 	switch (cdata->cmd) {
 	case SOF_CTRL_CMD_BINARY:
-		trace_selector("selector_ctrl_get_data(), SOF_CTRL_CMD_BINARY");
+		comp_info(dev, "selector_ctrl_get_data(), SOF_CTRL_CMD_BINARY");
 
 		/* Copy back to user space */
-		assert(!memcpy_s(cdata->data->data, ((struct sof_abi_hdr *)
-				 (cdata->data))->size, &cd->config,
-				 sizeof(cd->config)));
+		ret = memcpy_s(cdata->data->data, ((struct sof_abi_hdr *)
+			       (cdata->data))->size, &cd->config,
+			       sizeof(cd->config));
+		assert(!ret);
 
 		cdata->data->abi = SOF_ABI_VERSION;
 		cdata->data->size = sizeof(cd->config);
 		break;
 
 	default:
-		trace_selector_error("selector_ctrl_get_data() error:"
-				     "invalid cdata->cmd");
+		comp_err(dev, "selector_ctrl_get_data() error: invalid cdata->cmd");
 		ret = -EINVAL;
 		break;
 	}
@@ -248,7 +320,7 @@ static int selector_cmd(struct comp_dev *dev, int cmd, void *data,
 	struct sof_ipc_ctrl_data *cdata = data;
 	int ret = 0;
 
-	trace_selector("selector_cmd()");
+	comp_info(dev, "selector_cmd()");
 
 	switch (cmd) {
 	case COMP_CMD_SET_DATA:
@@ -258,13 +330,13 @@ static int selector_cmd(struct comp_dev *dev, int cmd, void *data,
 		ret = selector_ctrl_get_data(dev, cdata, max_data_size);
 		break;
 	case COMP_CMD_SET_VALUE:
-		trace_selector("selector_cmd(), COMP_CMD_SET_VALUE");
+		comp_info(dev, "selector_cmd(), COMP_CMD_SET_VALUE");
 		break;
 	case COMP_CMD_GET_VALUE:
-		trace_selector("selector_cmd(), COMP_CMD_GET_VALUE");
+		comp_info(dev, "selector_cmd(), COMP_CMD_GET_VALUE");
 		break;
 	default:
-		trace_selector_error("selector_cmd() error: invalid command");
+		comp_err(dev, "selector_cmd() error: invalid command");
 		ret = -EINVAL;
 	}
 
@@ -279,12 +351,22 @@ static int selector_cmd(struct comp_dev *dev, int cmd, void *data,
  */
 static int selector_trigger(struct comp_dev *dev, int cmd)
 {
+	struct comp_buffer *sourceb;
 	int ret;
 
-	trace_selector("selector_trigger()");
+	comp_info(dev, "selector_trigger()");
+
+	sourceb = list_first_item(&dev->bsource_list, struct comp_buffer,
+				  sink_list);
 
 	ret = comp_set_state(dev, cmd);
-	return ret == 0 ? PPL_STATUS_PATH_STOP : ret;
+
+	/* TODO: remove in the future after adding support for case when
+	 * kpb_init_draining() and kpb_draining_task() are interrupted by
+	 * new pipeline_task()
+	 */
+	return dev_comp_type(sourceb->source) == SOF_COMP_KPB ?
+		PPL_STATUS_PATH_STOP : ret;
 }
 
 /**
@@ -300,8 +382,9 @@ static int selector_copy(struct comp_dev *dev)
 	uint32_t frames;
 	uint32_t source_bytes;
 	uint32_t sink_bytes;
+	uint32_t flags = 0;
 
-	tracev_selector("selector_copy()");
+	comp_dbg(dev, "selector_copy()");
 
 	/* selector component will have 1 source and 1 sink buffer */
 	source = list_first_item(&dev->bsource_list, struct comp_buffer,
@@ -309,33 +392,23 @@ static int selector_copy(struct comp_dev *dev)
 	sink = list_first_item(&dev->bsink_list, struct comp_buffer,
 			       source_list);
 
-	/* check for underrun */
-	if (source->avail == 0) {
-		trace_selector_error("selector_copy() error: "
-				     "source component buffer has not enough "
-				     "data available");
-		comp_underrun(dev, source, 0, 0);
-		return -EIO;
-	}
+	buffer_lock(source, &flags);
+	buffer_lock(sink, &flags);
 
-	/* check for overrun */
-	if (sink->free == 0) {
-		trace_selector_error("selector_copy() error: "
-				     "sink component buffer has not enough "
-				     "free bytes for copy");
-		comp_overrun(dev, sink, 0, 0);
-		return -EIO;
-	}
+	frames = audio_stream_avail_frames(&source->stream, &sink->stream);
+	source_bytes = frames * audio_stream_frame_bytes(&source->stream);
+	sink_bytes = frames * audio_stream_frame_bytes(&sink->stream);
 
-	frames = comp_avail_frames(source, sink);
-	source_bytes = frames * comp_frame_bytes(source->source);
-	sink_bytes = frames * comp_frame_bytes(sink->sink);
+	buffer_unlock(sink, flags);
+	buffer_unlock(source, flags);
 
-	tracev_selector("selector_copy(), source_bytes = 0x%x, sink_bytes = "
-			"0x%x", source_bytes, sink_bytes);
+	comp_dbg(dev, "selector_copy(), source_bytes = 0x%x, sink_bytes = 0x%x",
+		 source_bytes, sink_bytes);
 
 	/* copy selected channels from in to out */
-	cd->sel_func(dev, sink, source, frames);
+	buffer_invalidate(source, source_bytes);
+	cd->sel_func(dev, &sink->stream, &source->stream, frames);
+	buffer_writeback(sink, sink_bytes);
 
 	/* calculate new free and available */
 	comp_update_buffer_produce(sink, sink_bytes);
@@ -354,10 +427,10 @@ static int selector_prepare(struct comp_dev *dev)
 	struct comp_data *cd = comp_get_drvdata(dev);
 	struct comp_buffer *sinkb;
 	struct comp_buffer *sourceb;
-	struct sof_ipc_comp_config *config = COMP_GET_CONFIG(dev);
+	struct sof_ipc_comp_config *config = dev_comp_config(dev);
 	int ret;
 
-	trace_selector("selector_prepare()");
+	comp_info(dev, "selector_prepare()");
 
 	ret = comp_set_state(dev, COMP_TRIGGER_PREPARE);
 	if (ret < 0)
@@ -373,63 +446,55 @@ static int selector_prepare(struct comp_dev *dev)
 				source_list);
 
 	/* get source data format and period bytes */
-	cd->source_format = comp_frame_fmt(sourceb->source);
-	cd->source_period_bytes = comp_period_bytes(sourceb->source,
-						    dev->frames);
+	cd->source_format = sourceb->stream.frame_fmt;
+	cd->source_period_bytes =
+		audio_stream_period_bytes(&sourceb->stream, dev->frames);
 
 	/* get sink data format and period bytes */
-	cd->sink_format = comp_frame_fmt(sinkb->sink);
-	cd->sink_period_bytes = comp_period_bytes(sinkb->sink, dev->frames);
+	cd->sink_format = sinkb->stream.frame_fmt;
+	cd->sink_period_bytes =
+		audio_stream_period_bytes(&sinkb->stream, dev->frames);
 
 	/* There is an assumption that sink component will report out
 	 * proper number of channels [1] for selector to actually
 	 * reduce channel count between source and sink
 	 */
-	trace_selector("selector_prepare(): source->params.channels = %u",
-		       sourceb->sink->params.channels);
-	trace_selector("selector_prepare(): sink->params.channels = %u",
-		       sinkb->sink->params.channels);
+	comp_info(dev, "selector_prepare(): sourceb->schannels = %u",
+		  sourceb->stream.channels);
+	comp_info(dev, "selector_prepare(): sinkb->channels = %u",
+		  sinkb->stream.channels);
 
-	/* set downstream buffer size */
-	ret = buffer_set_size(sinkb, cd->sink_period_bytes *
-			      config->periods_sink);
-	if (ret < 0) {
-		trace_selector_error("selector_prepare() error: "
-				     "buffer_set_size() failed");
+	if (sinkb->stream.size < config->periods_sink * cd->sink_period_bytes) {
+		comp_err(dev, "selector_prepare() error: sink buffer size is insufficient");
+		ret = -ENOMEM;
 		goto err;
 	}
 
 	/* validate */
 	if (cd->sink_period_bytes == 0) {
-		trace_selector_error("selector_prepare() error: "
-				     "cd->sink_period_bytes = 0, dev->frames ="
-				     " %u", dev->frames);
+		comp_err(dev, "selector_prepare() error: cd->sink_period_bytes = 0, dev->frames = %u",
+			 dev->frames);
 		ret = -EINVAL;
 		goto err;
 	}
 
 	if (cd->source_period_bytes == 0) {
-		trace_selector_error("selector_prepare() error: "
-				     "cd->source_period_bytes = 0, "
-				     "dev->frames = %u", dev->frames);
+		comp_err(dev, "selector_prepare() error: cd->source_period_bytes = 0, dev->frames = %u",
+			 dev->frames);
 		ret = -EINVAL;
 		goto err;
 	}
 
 	cd->sel_func = sel_get_processing_function(dev);
 	if (!cd->sel_func) {
-		trace_selector_error("selector_prepare() error: "
-				     "invalid cd->sel_func, "
-				     "cd->source_format = %u, "
-				     "cd->sink_format = %u, "
-				     "cd->out_channels_count = %u",
-				     cd->source_format, cd->sink_format,
-				     cd->config.out_channels_count);
+		comp_err(dev, "selector_prepare() error: invalid cd->sel_func, cd->source_format = %u, cd->sink_format = %u, cd->out_channels_count = %u",
+			 cd->source_format, cd->sink_format,
+			 cd->config.out_channels_count);
 		ret = -EINVAL;
 		goto err;
 	}
 
-	return PPL_STATUS_PATH_STOP;
+	return 0;
 
 err:
 	comp_set_state(dev, COMP_TRIGGER_RESET);
@@ -445,45 +510,17 @@ static int selector_reset(struct comp_dev *dev)
 {
 	int ret;
 
-	trace_selector("selector_reset()");
+	comp_info(dev, "selector_reset()");
 
 	ret = comp_set_state(dev, COMP_TRIGGER_RESET);
-	return ret == 0 ? PPL_STATUS_PATH_STOP : ret;
-}
 
-/**
- * \brief Executes cache operation on selector component.
- * \param[in,out] dev Selector base component device.
- * \param[in] cmd Cache command.
- */
-static void selector_cache(struct comp_dev *dev, int cmd)
-{
-	struct comp_data *cd;
-
-	switch (cmd) {
-	case CACHE_WRITEBACK_INV:
-		trace_selector("selector_cache(), CACHE_WRITEBACK_INV");
-
-		cd = comp_get_drvdata(dev);
-
-		dcache_writeback_invalidate_region(cd, sizeof(*cd));
-		dcache_writeback_invalidate_region(dev, sizeof(*dev));
-		break;
-
-	case CACHE_INVALIDATE:
-		trace_selector("selector_cache(), CACHE_INVALIDATE");
-
-		dcache_invalidate_region(dev, sizeof(*dev));
-
-		cd = comp_get_drvdata(dev);
-		dcache_invalidate_region(cd, sizeof(*cd));
-		break;
-	}
+	return ret;
 }
 
 /** \brief Selector component definition. */
-struct comp_driver comp_selector = {
+static const struct comp_driver comp_selector = {
 	.type	= SOF_COMP_SELECTOR,
+	.uid	= SOF_UUID(selector_uuid),
 	.ops	= {
 		.new		= selector_new,
 		.free		= selector_free,
@@ -493,14 +530,18 @@ struct comp_driver comp_selector = {
 		.copy		= selector_copy,
 		.prepare	= selector_prepare,
 		.reset		= selector_reset,
-		.cache		= selector_cache,
 	},
+};
+
+static SHARED_DATA struct comp_driver_info comp_selector_info = {
+	.drv = &comp_selector,
 };
 
 /** \brief Initializes selector component. */
 static void sys_comp_selector_init(void)
 {
-	comp_register(&comp_selector);
+	comp_register(platform_shared_get(&comp_selector_info,
+					  sizeof(comp_selector_info)));
 }
 
 DECLARE_MODULE(sys_comp_selector_init);

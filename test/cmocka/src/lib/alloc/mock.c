@@ -7,8 +7,10 @@
 
 #include <stdint.h>
 
-#include <sof/alloc.h>
-#include <sof/trace.h>
+#include <sof/lib/alloc.h>
+#include <sof/trace/trace.h>
+#include <sof/debug/panic.h>
+#include <sof/schedule/task.h>
 
 #include <mock_trace.h>
 
@@ -17,10 +19,11 @@ TRACE_IMPL()
 struct dma_copy;
 struct dma_sg_config;
 
-void arch_dump_regs_a(void *dump_buf, uint32_t ps)
+static struct sof sof;
+
+void arch_dump_regs_a(void *dump_buf)
 {
 	(void)dump_buf;
-	(void)ps;
 }
 
 int rstrlen(const char *s)
@@ -32,4 +35,14 @@ int rstrlen(const char *s)
 
 void trace_flush(void)
 {
+}
+
+volatile void *task_context_get(void)
+{
+	return NULL;
+}
+
+struct sof *sof_get(void)
+{
+	return &sof;
 }

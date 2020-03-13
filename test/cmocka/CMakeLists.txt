@@ -53,10 +53,13 @@ add_custom_command(OUTPUT ${memory_mock_lds_out}
 )
 
 add_custom_target(ld_script_memory_mock DEPENDS ${memory_mock_lds_out})
-SET(arch_src ${PROJECT_SOURCE_DIR}/src/arch/xtensa/smp/idc.c)
-add_library(universal_mock STATIC ${PROJECT_SOURCE_DIR}/test/cmocka/src/universal_mocks.c)
-target_link_libraries(universal_mock PRIVATE sof_options)
-link_libraries(universal_mock)
+SET(arch_src ${PROJECT_SOURCE_DIR}/src/arch/xtensa/idc.c)
+add_library(common_mock STATIC ${PROJECT_SOURCE_DIR}/test/cmocka/src/common_mocks.c)
+add_dependencies(common_mock cmocka)
+target_include_directories(common_mock PRIVATE ${CMOCKA_INCLUDE_DIR})
+target_link_libraries(common_mock PRIVATE sof_options)
+link_libraries(common_mock)
+sof_append_relative_path_definitions(common_mock)
 
 # creates exectuable for new test and adds it as test for ctest
 function(cmocka_test test_name)
@@ -68,12 +71,15 @@ function(cmocka_test test_name)
 	target_link_libraries(${test_name} PRIVATE "-T${memory_mock_lds_out}")
 	target_link_libraries(${test_name} PRIVATE cmocka)
 	target_link_libraries(${test_name} PRIVATE sof_options)
+	target_link_libraries(${test_name} PRIVATE common_mock)
 	target_compile_definitions(${test_name} PRIVATE -DUNIT_TEST)
 
 	# Cmocka requires this define for stdint.h that defines uintptr
 	target_compile_definitions(${test_name} PRIVATE -D_UINTPTR_T_DEFINED)
 
 	add_test(NAME ${test_name} COMMAND xt-run --exit_with_target_code ${test_name})
+
+	sof_append_relative_path_definitions(${test_name})
 endfunction()
 
 add_subdirectory(src)

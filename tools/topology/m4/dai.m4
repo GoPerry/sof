@@ -125,13 +125,13 @@ define(`D_DAI', `SectionDAI."'N_DAI`" {'
 
 dnl DAI Config)
 define(`N_DAI_CONFIG', `DAICONFIG.'$1)
-dnl DAI_CONFIG(type, idx, link_id, name, ssp_config/dmic_config)
+dnl DAI_CONFIG(type, idx, link_id, name, sai_config/esai_config/ssp_config/dmic_config)
 define(`DO_DAI_CONFIG',
 `SectionHWConfig."'$1$2`" {'
 `'
 `	id		"'$3`"'
 `'
-`	ifelse($1, `SSP', $5, `}')'
+`	ifelse($1, `SSP', $5, $1, `ESAI', $5, $1, `SAI', $5, `}')'
 `ifelse($1, `DMIC', $5, `')'
 `SectionVendorTuples."'N_DAI_CONFIG($1$2)`_tuples_common" {'
 `	tokens "sof_dai_tokens"'
@@ -155,7 +155,7 @@ define(`DO_DAI_CONFIG',
 `		"'$1$2`"'
 `	]'
 `	data ['
-`		ifelse($1, `HDA', `', "'N_DAI_CONFIG($1$2)`_data")'
+`		ifelse($1, `HDA', `', ifelse($1, `ALH', `', "'N_DAI_CONFIG($1$2)`_data"))'
 `		"'N_DAI_CONFIG($1$2)`_data_common"'
 `ifelse($1, `DMIC',`		"'N_DAI_CONFIG($1$2)`_pdm_data"', `')'
 `	]'
@@ -171,7 +171,7 @@ define(`DAI_CONFIG',
 dnl DAI_ADD(pipeline,
 dnl     pipe id, dai type, dai_index, dai_be,
 dnl     buffer, periods, format,
-dnl     frames, deadline, priority, core, time_domain)
+dnl     period , priority, core, time_domain)
 define(`DAI_ADD',
 `undefine(`PIPELINE_ID')'
 `undefine(`DAI_TYPE')'
@@ -180,8 +180,7 @@ define(`DAI_ADD',
 `undefine(`DAI_BUF')'
 `undefine(`DAI_PERIODS')'
 `undefine(`DAI_FORMAT')'
-`undefine(`SCHEDULE_FRAMES')'
-`undefine(`SCHEDULE_DEADLINE')'
+`undefine(`SCHEDULE_PERIOD')'
 `undefine(`SCHEDULE_PRIORITY')'
 `undefine(`SCHEDULE_CORE')'
 `undefine(`SCHEDULE_TIME_DOMAIN')'
@@ -193,11 +192,10 @@ define(`DAI_ADD',
 `define(`DAI_NAME', $3$4)'
 `define(`DAI_PERIODS', $7)'
 `define(`DAI_FORMAT', $8)'
-`define(`SCHEDULE_FRAMES', $9)'
-`define(`SCHEDULE_DEADLINE', $10)'
-`define(`SCHEDULE_PRIORITY', $11)'
-`define(`SCHEDULE_CORE', $12)'
-`define(`SCHEDULE_TIME_DOMAIN', $13)'
+`define(`SCHEDULE_PERIOD', $9)'
+`define(`SCHEDULE_PRIORITY', $10)'
+`define(`SCHEDULE_CORE', $11)'
+`define(`SCHEDULE_TIME_DOMAIN', $12)'
 `include($1)'
 `DEBUG_DAI($3, $4)'
 )

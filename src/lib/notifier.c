@@ -4,98 +4,180 @@
 //
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 
-#include <sof/notifier.h>
-#include <sof/sof.h>
+#include <sof/common.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/idc.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/notifier.h>
 #include <sof/list.h>
-#include <sof/alloc.h>
-#include <sof/cpu.h>
-#include <sof/idc.h>
-#include <platform/idc.h>
+#include <sof/sof.h>
+#include <ipc/topology.h>
 
-static struct notify_data _notify_data;
+#define trace_notifier(__e, ...) \
+	trace_event(TRACE_CLASS_NOTIFIER, __e, ##__VA_ARGS__)
+#define tracev_notifier(__e, ...) \
+	tracev_event(TRACE_CLASS_NOTIFIER, __e, ##__VA_ARGS__)
+#define trace_notifier_error(__e, ...) \
+	trace_error(TRACE_CLASS_NOTIFIER, __e, ##__VA_ARGS__)
 
-void notifier_register(struct notifier *notifier)
+static SHARED_DATA struct notify_data notify_data[PLATFORM_CORE_COUNT];
+
+struct callback_handle {
+	void *receiver;
+	void *caller;
+	void (*cb)(void *arg, enum notify_id, void *data);
+	struct list_item list;
+};
+
+int notifier_register(void *receiver, void *caller, enum notify_id type,
+		      void (*cb)(void *arg, enum notify_id type, void *data))
 {
 	struct notify *notify = *arch_notify_get();
+	struct callback_handle *handle;
 
-	spin_lock(&notify->lock);
-	list_item_prepend(&notifier->list, &notify->list);
-	spin_unlock(&notify->lock);
+	assert(type >= NOTIFIER_ID_CPU_FREQ && type < NOTIFIER_ID_COUNT);
+
+	handle = rzalloc(SOF_MEM_ZONE_SYS_RUNTIME, 0, SOF_MEM_CAPS_RAM,
+			 sizeof(*handle));
+
+	if (!handle) {
+		trace_notifier_error("notifier_register() error: callback "
+				     "handle allocation failed.");
+		return -ENOMEM;
+	}
+
+	handle->receiver = receiver;
+	handle->caller = caller;
+	handle->cb = cb;
+
+	list_item_prepend(&handle->list, &notify->list[type]);
+
+	return 0;
 }
 
-void notifier_unregister(struct notifier *notifier)
-{
-	struct notify *notify = *arch_notify_get();
-
-	spin_lock(&notify->lock);
-	list_item_del(&notifier->list);
-	spin_unlock(&notify->lock);
-}
-
-void notifier_notify(void)
+void notifier_unregister(void *receiver, void *caller, enum notify_id type)
 {
 	struct notify *notify = *arch_notify_get();
 	struct list_item *wlist;
-	struct notifier *n;
+	struct list_item *tlist;
+	struct callback_handle *handle;
 
-	if (!list_is_empty(&notify->list)) {
-		dcache_invalidate_region(&_notify_data, sizeof(_notify_data));
-		dcache_invalidate_region(_notify_data.data,
-					 _notify_data.data_size);
+	assert(type >= NOTIFIER_ID_CPU_FREQ && type < NOTIFIER_ID_COUNT);
 
-		/* iterate through notifiers and send event to
-		 * interested clients
-		 */
-		list_for_item(wlist, &notify->list) {
-			n = container_of(wlist, struct notifier, list);
-			if (n->id == _notify_data.id)
-				n->cb(_notify_data.message, n->cb_data,
-				      _notify_data.data);
+	/*
+	 * Unregister all matching callbacks
+	 * If receiver is NULL, unregister all callbacks with matching callers
+	 * If caller is NULL, unregister all callbacks with matching receivers
+	 *
+	 * Event producer might force unregister all receivers by passing
+	 * receiver NULL
+	 * Event consumer might unregister from all callers by passing caller
+	 * NULL
+	 */
+	list_for_item_safe(wlist, tlist, &notify->list[type]) {
+		handle = container_of(wlist, struct callback_handle, list);
+		if ((!receiver || handle->receiver == receiver) &&
+		    (!caller || handle->caller == caller)) {
+			list_item_del(&handle->list);
+			rfree(handle);
 		}
 	}
 }
 
-void notifier_event(struct notify_data *notify_data)
+void notifier_unregister_all(void *receiver, void *caller)
+{
+	int i;
+
+	for (i = NOTIFIER_ID_CPU_FREQ; i < NOTIFIER_ID_COUNT; i++)
+		notifier_unregister(receiver, caller, i);
+}
+
+static void notifier_notify(const void *caller, enum notify_id type, void *data)
 {
 	struct notify *notify = *arch_notify_get();
+	struct list_item *wlist;
+	struct list_item *tlist;
+	struct callback_handle *handle;
+
+	/* iterate through notifiers and send event to
+	 * interested clients
+	 */
+	list_for_item_safe(wlist, tlist, &notify->list[type]) {
+		handle = container_of(wlist, struct callback_handle, list);
+		if (!caller || !handle->caller || handle->caller == caller)
+			handle->cb(handle->receiver, type, data);
+	}
+}
+
+void notifier_notify_remote(void)
+{
+	struct notify *notify = *arch_notify_get();
+	struct notify_data *notify_data = notify_data_get() + cpu_get_id();
+
+	if (!list_is_empty(&notify->list[notify_data->type])) {
+		dcache_invalidate_region(notify_data->data,
+					 notify_data->data_size);
+		notifier_notify(notify_data->caller, notify_data->type,
+				notify_data->data);
+	}
+
+	platform_shared_commit(notify_data, sizeof(*notify_data));
+}
+
+void notifier_event(const void *caller, enum notify_id type, uint32_t core_mask,
+		    void *data, uint32_t data_size)
+{
+	struct notify_data *notify_data;
 	struct idc_msg notify_msg = { IDC_MSG_NOTIFY, IDC_MSG_NOTIFY_EXT };
-	int i = 0;
-
-	spin_lock(&notify->lock);
-
-	_notify_data = *notify_data;
-	dcache_writeback_region(_notify_data.data, _notify_data.data_size);
-	dcache_writeback_region(&_notify_data, sizeof(_notify_data));
+	int i;
 
 	/* notify selected targets */
 	for (i = 0; i < PLATFORM_CORE_COUNT; i++) {
-		if (_notify_data.target_core_mask & (1 << i)) {
+		if (core_mask & NOTIFIER_TARGET_CORE_MASK(i)) {
 			if (i == cpu_get_id()) {
-				notifier_notify();
+				notifier_notify(caller, type, data);
 			} else if (cpu_is_core_enabled(i)) {
 				notify_msg.core = i;
-				idc_send_msg(&notify_msg, IDC_BLOCKING);
+				notify_data = notify_data_get() + i;
+				notify_data->caller = caller;
+				notify_data->type = type;
+
+				/* NOTE: for transcore events, payload has to
+				 * be allocated on heap, not on stack
+				 */
+				notify_data->data = data;
+				notify_data->data_size = data_size;
+
+				dcache_writeback_region(notify_data->data,
+							data_size);
+
+				platform_shared_commit(notify_data,
+						       sizeof(*notify_data));
+
+				idc_send_msg(&notify_msg, IDC_NON_BLOCKING);
 			}
 		}
 	}
-
-	spin_unlock(&notify->lock);
 }
 
 void init_system_notify(struct sof *sof)
 {
 	struct notify **notify = arch_notify_get();
-	*notify = rzalloc(RZONE_SYS, SOF_MEM_CAPS_RAM, sizeof(**notify));
+	int i;
+	*notify = rzalloc(SOF_MEM_ZONE_SYS, 0, SOF_MEM_CAPS_RAM,
+			  sizeof(**notify));
 
-	list_init(&(*notify)->list);
-	spinlock_init(&(*notify)->lock);
+	for (i = NOTIFIER_ID_CPU_FREQ; i < NOTIFIER_ID_COUNT; i++)
+		list_init(&(*notify)->list[i]);
+
+	if (cpu_get_id() == PLATFORM_MASTER_CORE_ID)
+		sof->notify_data = platform_shared_get(notify_data,
+						       sizeof(notify_data));
 }
 
 void free_system_notify(void)
 {
-	struct notify *notify = *arch_notify_get();
-
-	spin_lock(&notify->lock);
-	list_item_del(&notify->list);
-	spin_unlock(&notify->lock);
 }

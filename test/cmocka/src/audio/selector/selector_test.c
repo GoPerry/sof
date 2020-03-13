@@ -15,10 +15,10 @@
 
 struct sel_test_state {
 	struct comp_dev *dev;
-	struct comp_buffer *sink;
-	struct comp_buffer *source;
-	void (*verify)(struct comp_dev *dev, struct comp_buffer *sink,
-		       struct comp_buffer *source);
+	struct audio_stream *sink;
+	struct audio_stream *source;
+	void (*verify)(struct comp_dev *dev, struct audio_stream *sink,
+		       struct audio_stream *source);
 };
 
 struct sel_test_parameters {
@@ -29,8 +29,8 @@ struct sel_test_parameters {
 	uint32_t buffer_size_ms;
 	uint32_t source_format;
 	uint32_t sink_format;
-	void (*verify)(struct comp_dev *dev, struct comp_buffer *sink,
-		       struct comp_buffer *source);
+	void (*verify)(struct comp_dev *dev, struct audio_stream *sink,
+		       struct audio_stream *source);
 };
 
 static int setup(void **state)
@@ -39,13 +39,13 @@ static int setup(void **state)
 	struct sel_test_state *sel_state;
 	struct comp_data *cd;
 	uint32_t size = 0;
+	void *pbuff;
 
 	/* allocate new state */
 	sel_state = test_malloc(sizeof(*sel_state));
 
 	/* allocate and set new device */
 	sel_state->dev = test_malloc(COMP_SIZE(struct sof_ipc_comp_volume));
-	sel_state->dev->params.channels = parameters->in_channels;
 	sel_state->dev->frames = parameters->frames;
 
 	/* allocate and set new data */
@@ -63,22 +63,21 @@ static int setup(void **state)
 
 	/* allocate new sink buffer */
 	sel_state->sink = test_malloc(sizeof(*sel_state->sink));
-	sel_state->dev->params.frame_fmt = parameters->sink_format;
-	size = parameters->frames * comp_frame_bytes(sel_state->dev);
-	if (cd->config.out_channels_count == SEL_SINK_1CH){
-		size = size / sel_state->dev->params.channels;
-	}
-	sel_state->sink->w_ptr = test_calloc(parameters->buffer_size_ms,
-					     size);
-	sel_state->sink->size = parameters->buffer_size_ms * size;
+	sel_state->sink->frame_fmt = parameters->sink_format;
+	sel_state->sink->channels = parameters->out_channels;
+	size = parameters->frames * audio_stream_frame_bytes(sel_state->sink);
+	pbuff = test_calloc(parameters->buffer_size_ms, size);
+	audio_stream_init(sel_state->sink, pbuff,
+			  parameters->buffer_size_ms * size);
 
 	/* allocate new source buffer */
 	sel_state->source = test_malloc(sizeof(*sel_state->source));
-	sel_state->dev->params.frame_fmt = parameters->source_format;
-	size = parameters->frames * comp_frame_bytes(sel_state->dev);
-	sel_state->source->r_ptr = test_calloc(parameters->buffer_size_ms,
-					       size);
-	sel_state->source->size = parameters->buffer_size_ms * size;
+	sel_state->source->frame_fmt = parameters->source_format;
+	sel_state->source->channels = parameters->in_channels;
+	size = parameters->frames * audio_stream_frame_bytes(sel_state->source);
+	pbuff = test_calloc(parameters->buffer_size_ms, size);
+	audio_stream_init(sel_state->source, pbuff,
+			  parameters->buffer_size_ms * size);
 
 	/* assigns verification function */
 	sel_state->verify = parameters->verify;
@@ -97,15 +96,16 @@ static int teardown(void **state)
 	/* free everything */
 	test_free(cd);
 	test_free(sel_state->dev);
-	test_free(sel_state->sink->w_ptr);
+	test_free(sel_state->sink->addr);
 	test_free(sel_state->sink);
-	test_free(sel_state->source->r_ptr);
+	test_free(sel_state->source->addr);
 	test_free(sel_state->source);
 	test_free(sel_state);
 
 	return 0;
 }
 
+#if CONFIG_FORMAT_S16LE
 static void fill_source_s16(struct sel_test_state *sel_state)
 {
 	int16_t *src = (int16_t *)sel_state->source->r_ptr;
@@ -116,17 +116,9 @@ static void fill_source_s16(struct sel_test_state *sel_state)
 
 }
 
-static void fill_source_s32(struct sel_test_state *sel_state)
-{
-	int32_t *src = (int32_t *)sel_state->source->r_ptr;
-	int i;
-
-	for (i = 0; i < sel_state->source->size / sizeof(int32_t); i++)
-		src[i] = i << 16;
-}
-
-static void verify_s16le_Xch_to_1ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
+static void verify_s16le_Xch_to_1ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
 {
 	struct comp_data *cd = comp_get_drvdata(dev);
 	const uint16_t *src = (uint16_t *)source->r_ptr;
@@ -149,8 +141,59 @@ static void verify_s16le_Xch_to_1ch(struct comp_dev *dev, struct comp_buffer *si
 	}
 }
 
-static void verify_s32le_Xch_to_1ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
+static void verify_s16le_2ch_to_2ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
+{
+	const uint16_t *src = (uint16_t *)source->r_ptr;
+	const uint16_t *dst = (uint16_t *)sink->w_ptr;
+	uint32_t channels = source->channels;
+	uint32_t channel;
+	uint32_t i;
+	double processed;
+
+	for (i = 0; i < sink->size / sizeof(uint16_t); i += channels) {
+		for (channel = 0; channel < channels; channel++) {
+			processed = src[i + channel];
+			assert_int_equal(dst[i + channel], processed);
+		}
+	}
+}
+
+static void verify_s16le_4ch_to_4ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
+{
+	const uint16_t *src = (uint16_t *)source->r_ptr;
+	const uint16_t *dst = (uint16_t *)sink->w_ptr;
+	uint32_t channels = source->channels;
+	uint32_t channel;
+	uint32_t i;
+	double processed;
+
+	for (i = 0; i < sink->size / sizeof(uint16_t); i += channels) {
+		for (channel = 0; channel < channels; channel++) {
+			processed = src[i + channel];
+			assert_int_equal(dst[i + channel], processed);
+		}
+	}
+}
+
+#endif /* CONFIG_FORMAT_S16LE */
+
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
+static void fill_source_s32(struct sel_test_state *sel_state)
+{
+	int32_t *src = (int32_t *)sel_state->source->r_ptr;
+	int i;
+
+	for (i = 0; i < sel_state->source->size / sizeof(int32_t); i++)
+		src[i] = i << 16;
+}
+
+static void verify_s32le_Xch_to_1ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
 {
 	struct comp_data *cd = comp_get_drvdata(dev);
 	const uint32_t *src = (uint32_t *)source->r_ptr;
@@ -173,49 +216,13 @@ static void verify_s32le_Xch_to_1ch(struct comp_dev *dev, struct comp_buffer *si
 	}
 }
 
-
-static void verify_s16le_2ch_to_2ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
-{
-	const uint16_t *src = (uint16_t *)source->r_ptr;
-	const uint16_t *dst = (uint16_t *)sink->w_ptr;
-	uint32_t channels = dev->params.channels;
-	uint32_t channel;
-	uint32_t i;
-	double processed;
-
-	for (i = 0; i < sink->size / sizeof(uint16_t); i += channels) {
-		for (channel = 0; channel < channels; channel++) {
-			processed = src[i + channel];
-			assert_int_equal(dst[i + channel], processed);
-		}
-	}
-}
-
-static void verify_s16le_4ch_to_4ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
-{
-	const uint16_t *src = (uint16_t *)source->r_ptr;
-	const uint16_t *dst = (uint16_t *)sink->w_ptr;
-	uint32_t channels = dev->params.channels;
-	uint32_t channel;
-	uint32_t i;
-	double processed;
-
-	for (i = 0; i < sink->size / sizeof(uint16_t); i += channels) {
-		for (channel = 0; channel < channels; channel++) {
-			processed = src[i + channel];
-			assert_int_equal(dst[i + channel], processed);
-		}
-	}
-}
-
-static void verify_s32le_2ch_to_2ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
+static void verify_s32le_2ch_to_2ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
 {
 	const uint32_t *src = (uint32_t *)source->r_ptr;
 	const uint32_t *dst = (uint32_t *)sink->w_ptr;
-	uint32_t channels = dev->params.channels;
+	uint32_t channels = source->channels;
 	uint32_t channel;
 	uint32_t i;
 	uint32_t processed;
@@ -228,12 +235,13 @@ static void verify_s32le_2ch_to_2ch(struct comp_dev *dev, struct comp_buffer *si
 	}
 }
 
-static void verify_s32le_4ch_to_4ch(struct comp_dev *dev, struct comp_buffer *sink,
-			      struct comp_buffer *source)
+static void verify_s32le_4ch_to_4ch(struct comp_dev *dev,
+				    struct audio_stream *sink,
+				    struct audio_stream *source)
 {
 	const uint32_t *src = (uint32_t *)source->r_ptr;
 	const uint32_t *dst = (uint32_t *)sink->w_ptr;
-	uint32_t channels = dev->params.channels;
+	uint32_t channels = source->channels;
 	uint32_t channel;
 	uint32_t i;
 	uint32_t processed;
@@ -245,6 +253,7 @@ static void verify_s32le_4ch_to_4ch(struct comp_dev *dev, struct comp_buffer *si
 		}
 	}
 }
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 
 static void test_audio_sel(void **state)
 {
@@ -252,14 +261,18 @@ static void test_audio_sel(void **state)
 	struct comp_data *cd = comp_get_drvdata(sel_state->dev);
 
 	switch (cd->source_format) {
+#if CONFIG_FORMAT_S16LE
 	case SOF_IPC_FRAME_S16_LE:
 		fill_source_s16(sel_state);
 		break;
+#endif /* CONFIG_FORMAT_S16LE */
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
 	case SOF_IPC_FRAME_S24_4LE:
 	case SOF_IPC_FRAME_S32_LE:
 	case SOF_IPC_FRAME_FLOAT:
 		fill_source_s32(sel_state);
 		break;
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 	}
 
 	cd->sel_func(sel_state->dev, sel_state->sink, sel_state->source,
@@ -270,6 +283,7 @@ static void test_audio_sel(void **state)
 
 
 static struct sel_test_parameters parameters[] = {
+#if CONFIG_FORMAT_S16LE
 	{ 2, 1, 0, 16, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_Xch_to_1ch },
 	{ 2, 1, 1, 16, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_Xch_to_1ch },
 	{ 2, 1, 0, 48, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_Xch_to_1ch },
@@ -278,7 +292,8 @@ static struct sel_test_parameters parameters[] = {
 	{ 4, 4, 0, 48, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_4ch_to_4ch },
 	{ 2, 1, 0, 48, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_Xch_to_1ch },
 	{ 4, 1, 0, 48, 1, SOF_IPC_FRAME_S16_LE, SOF_IPC_FRAME_S16_LE, verify_s16le_Xch_to_1ch },
-
+#endif /* CONFIG_FORMAT_S16LE */
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
 	{ 2, 1, 0, 16, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_Xch_to_1ch },
 	{ 2, 1, 1, 16, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_Xch_to_1ch },
 	{ 2, 1, 0, 48, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_Xch_to_1ch },
@@ -287,6 +302,7 @@ static struct sel_test_parameters parameters[] = {
 	{ 4, 4, 0, 48, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_4ch_to_4ch },
 	{ 2, 1, 0, 48, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_Xch_to_1ch },
 	{ 4, 1, 0, 48, 1, SOF_IPC_FRAME_S24_4LE, SOF_IPC_FRAME_S24_4LE, verify_s32le_Xch_to_1ch },
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 };
 
 int main(void)

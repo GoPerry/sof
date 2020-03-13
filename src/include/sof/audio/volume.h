@@ -13,13 +13,20 @@
  *          Tomasz Lauda <tomasz.lauda@linux.intel.com>
  */
 
-#ifndef VOLUME_H
-#define VOLUME_H
+#ifndef __SOF_AUDIO_VOLUME_H__
+#define __SOF_AUDIO_VOLUME_H__
 
-#include <stdint.h>
 #include <sof/audio/component.h>
-#include <sof/audio/pipeline.h>
-#include <sof/audio/format.h>
+#include <sof/bit.h>
+#include <sof/schedule/task.h>
+#include <sof/trace/trace.h>
+#include <ipc/stream.h>
+#include <user/trace.h>
+#include <stddef.h>
+#include <stdint.h>
+
+struct comp_buffer;
+struct sof_ipc_ctrl_value_chan;
 
 #define CONFIG_GENERIC
 
@@ -31,18 +38,6 @@
 #endif
 
 #endif
-
-/** \brief Volume trace function. */
-#define trace_volume(__e, ...) \
-	trace_event(TRACE_CLASS_VOLUME, __e, ##__VA_ARGS__)
-
-/** \brief Volume trace value function. */
-#define tracev_volume(__e, ...) \
-	tracev_event(TRACE_CLASS_VOLUME, __e, ##__VA_ARGS__)
-
-/** \brief Volume trace error function. */
-#define trace_volume_error(__e, ...) \
-	trace_error(TRACE_CLASS_VOLUME, __e, ##__VA_ARGS__)
 
 //** \brief Volume gain Qx.y integer x number of bits including sign bit. */
 #define VOL_QXY_X 8
@@ -59,12 +54,13 @@
 /**
  * \brief Macro for volume linear gain ramp step computation
  * Volume gain ramp step as Q1.16 is computed with equation
- * step = VOL_RAMP_STEP_CONST/ SOF_TKN_VOLUME_RAMP_STEP_MS. This
+ * step = VOL_RAMP_STEP_CONST / SOF_TKN_VOLUME_RAMP_STEP_MS. This
  * macro defines as Q1.16 value the constant term
- * (1000 / VOL_RAMP_UPDATE) for step calculation.
+ * VOL_RAMP_UPDATE / 1000.0 for step calculation. The value 1000
+ * is used to to convert microseconds to milliseconds.
  */
 #define VOL_RAMP_STEP_CONST \
-	Q_CONVERT_FLOAT(1000.0 / VOL_RAMP_UPDATE_US, VOL_QXY_Y)
+	Q_CONVERT_FLOAT(VOL_RAMP_UPDATE_US / 1000.0, VOL_QXY_Y)
 
 /**
  * \brief Volume maximum value.
@@ -80,12 +76,18 @@
 #define VOL_MIN		0
 
 /**
+ * \brief volume processing function interface
+ */
+typedef void (*vol_scale_func)(struct comp_dev *dev, struct audio_stream *sink,
+			       const struct audio_stream *source,
+			       uint32_t frames);
+/**
  * \brief Volume component private data.
  *
  * Gain amplitude value is between 0 (mute) ... 2^16 (0dB) ... 2^24 (~+48dB).
  */
 struct comp_data {
-	struct task volwork;		/**< volume scheduled work function */
+	struct task *volwork;		/**< volume scheduled work function */
 	struct sof_ipc_ctrl_value_chan *hvol;	/**< host volume readback */
 	int32_t volume[SOF_IPC_MAX_CHANNELS];	/**< current volume */
 	int32_t tvolume[SOF_IPC_MAX_CHANNELS];	/**< target volume */
@@ -94,20 +96,17 @@ struct comp_data {
 	int32_t vol_min;			/**< minimum volume */
 	int32_t vol_max;			/**< maximum volume */
 	int32_t	vol_ramp_range;			/**< max ramp transition */
-	enum sof_ipc_frame source_format;	/**< source frame format */
-	enum sof_ipc_frame sink_format;		/**< sink frame format */
-	/**< volume processing function */
-	void (*scale_vol)(struct comp_dev *dev, struct comp_buffer *sink,
-			  struct comp_buffer *source, uint32_t frames);
+	unsigned int channels;			/**< current channels count */
+	bool muted[SOF_IPC_MAX_CHANNELS];	/**< set if channel is muted */
+	bool vol_ramp_active;			/**< set if volume is ramped */
+	bool ramp_started;			/**< control ramp launch */
+	vol_scale_func scale_vol;	/**< volume processing function */
 };
 
 /** \brief Volume processing functions map. */
 struct comp_func_map {
-	uint16_t source;			/**< source frame format */
-	uint16_t sink;				/**< sink frame format */
-	/**< volume processing function */
-	void (*func)(struct comp_dev *dev, struct comp_buffer *sink,
-		     struct comp_buffer *source, uint32_t frames);
+	uint16_t frame_fmt;	/**< frame format */
+	vol_scale_func func;	/**< volume processing function */
 };
 
 /** \brief Map of formats with dedicated processing functions. */
@@ -116,23 +115,21 @@ extern const struct comp_func_map func_map[];
 /** \brief Number of processing functions. */
 extern const size_t func_count;
 
-typedef void (*scale_vol)(struct comp_dev *, struct comp_buffer *,
-			  struct comp_buffer *, uint32_t);
-
 /**
  * \brief Retrievies volume processing function.
  * \param[in,out] dev Volume base component device.
  */
-static inline scale_vol vol_get_processing_function(struct comp_dev *dev)
+static inline vol_scale_func vol_get_processing_function(struct comp_dev *dev)
 {
-	struct comp_data *cd = comp_get_drvdata(dev);
+	struct comp_buffer *sinkb;
 	int i;
+
+	sinkb = list_first_item(&dev->bsink_list, struct comp_buffer,
+				source_list);
 
 	/* map the volume function for source and sink buffers */
 	for (i = 0; i < func_count; i++) {
-		if (cd->source_format != func_map[i].source)
-			continue;
-		if (cd->sink_format != func_map[i].sink)
+		if (sinkb->stream.frame_fmt != func_map[i].frame_fmt)
 			continue;
 
 		return func_map[i].func;
@@ -141,4 +138,4 @@ static inline scale_vol vol_get_processing_function(struct comp_dev *dev)
 	return NULL;
 }
 
-#endif /* VOLUME_H */
+#endif /* __SOF_AUDIO_VOLUME_H__ */

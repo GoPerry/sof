@@ -5,8 +5,8 @@
  * Author: Seppo Ingalsuo <seppo.ingalsuo@linux.intel.com>
  */
 
-#ifndef SRC_CONFIG_H
-#define SRC_CONFIG_H
+#ifndef __SOF_AUDIO_SRC_SRC_CONFIG_H__
+#define __SOF_AUDIO_SRC_SRC_CONFIG_H__
 
 #include <config.h>
 
@@ -42,7 +42,7 @@
 #endif
 #else
 /* GCC */
-#if defined(CONFIG_LIBRARY)
+#if CONFIG_LIBRARY
 #define SRC_SHORT	0  /* Use high quality 32 bit filter coefficients */
 #else
 #define SRC_SHORT	1  /* Use 16 bit filter coefficients for speed */
@@ -53,4 +53,4 @@
 #endif
 #endif
 
-#endif
+#endif /* __SOF_AUDIO_SRC_SRC_CONFIG_H__ */

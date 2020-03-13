@@ -80,6 +80,9 @@ static int elf_read_sections(struct image *image, struct module *module,
 
 		module->logs_index = -EINVAL;
 
+		fprintf(stdout, "info: ignore .static_uuids section for bootloader module\n");
+		module->uids_index = -EINVAL;
+
 		fprintf(stdout, "info: ignore .fw_ready"
 			" section for bootloader module\n");
 
@@ -93,8 +96,9 @@ static int elf_read_sections(struct image *image, struct module *module,
 		/* find log entries and fw ready sections */
 		module->logs_index = elf_find_section(image, module,
 						      ".static_log_entries");
-		if (module->logs_index < 0)
-			return module->logs_index;
+
+		module->uids_index = elf_find_section(image, module,
+						      ".static_uuid_entries");
 
 		module->fw_ready_index = elf_find_section(image, module,
 							  ".fw_ready");
@@ -526,7 +530,7 @@ int elf_find_section(struct image *image, struct module *module,
 		}
 	}
 
-	fprintf(stderr, "error: can't find section %s in module %s\n", name,
+	fprintf(stderr, "warning: can't find section %s in module %s\n", name,
 		module->elf_file);
 	ret = -EINVAL;
 

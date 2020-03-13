@@ -12,41 +12,48 @@
  *
  */
 
-#include <stdbool.h>
-#include <sof/debug.h>
-#include <sof/timer.h>
-#include <sof/interrupt.h>
-#include <sof/ipc.h>
-#include <sof/mailbox.h>
-#include <sof/sof.h>
-#include <sof/stream.h>
-#include <sof/dai.h>
-#include <sof/dma.h>
-#include <sof/alloc.h>
-#include <sof/wait.h>
-#include <sof/trace.h>
-#include <sof/clk.h>
-#include <sof/math/numbers.h>
-#include <platform/interrupt.h>
-#include <platform/mailbox.h>
-#include <platform/dma.h>
-#include <platform/timer.h>
-#include <platform/idc.h>
+#include <sof/audio/buffer.h>
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
+#include <sof/common.h>
+#include <sof/debug/gdb/gdb.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/idc.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
 #include <sof/drivers/timer.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/dai.h>
+#include <sof/lib/dma.h>
+#include <sof/lib/mailbox.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/pm_runtime.h>
+#include <sof/list.h>
+#include <sof/math/numbers.h>
+#include <sof/platform.h>
+#include <sof/schedule/schedule.h>
+#include <sof/schedule/task.h>
+#include <sof/spinlock.h>
+#include <sof/string.h>
+#include <sof/trace/dma-trace.h>
+#include <sof/trace/trace.h>
+#include <ipc/control.h>
+#include <ipc/dai.h>
 #include <ipc/header.h>
 #include <ipc/pm.h>
 #include <ipc/stream.h>
 #include <ipc/topology.h>
-#include <ipc/pm.h>
-#include <ipc/control.h>
-#include <sof/dma-trace.h>
-#include <sof/cpu.h>
-#include <sof/idc.h>
+#include <ipc/trace.h>
+#include <user/trace.h>
+#include <ipc/probe.h>
+#include <sof/probe/probe.h>
 #include <config.h>
-#include <arch/gdb/init.h>
-#include <sof/gdb/gdb.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define iGS(x) ((x) & SOF_GLB_TYPE_MASK)
 #define iCS(x) ((x) & SOF_CMD_TYPE_MASK)
@@ -82,18 +89,22 @@
 
 #define _IPC_COPY_CMD(rx, tx, rx_size)					\
 	do {								\
+		int ___ret;						\
 		if (rx_size > tx->size) {				\
-			assert(!memcpy_s(rx, rx_size, tx, tx->size));	\
-			bzero((void *)rx + tx->size, rx_size - tx->size);\
+			___ret = memcpy_s(rx, rx_size, tx, tx->size);	\
+			assert(!___ret);				\
+			bzero((char *)rx + tx->size, rx_size - tx->size);\
 			trace_ipc("ipc: hdr 0x%x rx (%d) > tx (%d)",	\
 				  rx->cmd, rx_size, tx->size);		\
 		} else if (tx->size > rx_size) {			\
-			assert(!memcpy_s(rx, rx_size, tx, rx_size));	\
+			___ret = memcpy_s(rx, rx_size, tx, rx_size);	\
+			assert(!___ret);				\
 			trace_ipc("ipc: hdr 0x%x tx (%d) > rx (%d)",	\
 				  rx->cmd, tx->size, rx_size);		\
-		} else							\
-			assert(!memcpy_s(rx, rx_size, tx, rx_size));	\
-									\
+		} else	{						\
+			___ret = memcpy_s(rx, rx_size, tx, rx_size);	\
+			assert(!___ret);				\
+		}							\
 	} while (0)
 
 /* copies whole message from Tx to Rx, follows above ABI rules */
@@ -102,12 +113,9 @@
 			((struct sof_ipc_cmd_hdr *)tx),			\
 			sizeof(rx))
 
-/* IPC context - shared with platform IPC driver */
-struct ipc *_ipc;
-
-static inline struct sof_ipc_cmd_hdr *mailbox_validate(void)
+struct sof_ipc_cmd_hdr *mailbox_validate(void)
 {
-	struct sof_ipc_cmd_hdr *hdr = _ipc->comp_data;
+	struct sof_ipc_cmd_hdr *hdr = ipc_get()->comp_data;
 
 	/* read component values from the inbox */
 	mailbox_hostbox_read(hdr, SOF_IPC_MSG_MAX_SIZE, 0, sizeof(*hdr));
@@ -122,7 +130,7 @@ static inline struct sof_ipc_cmd_hdr *mailbox_validate(void)
 	mailbox_hostbox_read(hdr + 1, SOF_IPC_MSG_MAX_SIZE - sizeof(*hdr),
 			     sizeof(*hdr), hdr->size - sizeof(*hdr));
 
-	dcache_writeback_region(hdr, hdr->size);
+	platform_shared_commit(hdr, hdr->size);
 
 	return hdr;
 }
@@ -131,7 +139,7 @@ static inline struct sof_ipc_cmd_hdr *mailbox_validate(void)
  * Stream IPC Operations.
  */
 
-#ifdef CONFIG_HOST_PTABLE
+#if CONFIG_HOST_PTABLE
 /* check if a pipeline is hostless when walking downstream */
 static bool is_hostless_downstream(struct comp_dev *current)
 {
@@ -201,28 +209,34 @@ static bool is_hostless_upstream(struct comp_dev *current)
 /* allocate a new stream */
 static int ipc_stream_pcm_params(uint32_t stream)
 {
-#ifdef CONFIG_HOST_PTABLE
+#if CONFIG_HOST_PTABLE
 	struct sof_ipc_comp_host *host = NULL;
 	struct dma_sg_elem_array elem_array;
 	uint32_t ring_size;
+	enum comp_copy_type copy_type = COMP_COPY_ONE_SHOT;
+	struct comp_dev *cd;
 #endif
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_pcm_params pcm_params;
 	struct sof_ipc_pcm_params_reply reply;
 	struct ipc_comp_dev *pcm_dev;
-	struct comp_dev *cd;
-	int err, posn_offset;
+	int err, reset_err;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(pcm_params, _ipc->comp_data);
-
-	trace_ipc("ipc: comp %d -> params", pcm_params.comp_id);
+	IPC_COPY_CMD(pcm_params, ipc->comp_data);
 
 	/* get the pcm_dev */
-	pcm_dev = ipc_get_comp(_ipc, pcm_params.comp_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, pcm_params.comp_id);
 	if (pcm_dev == NULL) {
 		trace_ipc_error("ipc: comp %d not found", pcm_params.comp_id);
 		return -ENODEV;
 	}
+
+	/* check core */
+	if (!cpu_is_me(pcm_dev->core))
+		return ipc_process_on_core(pcm_dev->core);
+
+	trace_ipc("ipc: comp %d -> params", pcm_params.comp_id);
 
 	/* sanity check comp */
 	if (pcm_dev->cd->pipeline == NULL) {
@@ -231,15 +245,13 @@ static int ipc_stream_pcm_params(uint32_t stream)
 		return -EINVAL;
 	}
 
-	/* set params component params */
-	cd = pcm_dev->cd;
 	if (IPC_IS_SIZE_INVALID(pcm_params.params)) {
 		IPC_SIZE_ERROR_TRACE(TRACE_CLASS_IPC, pcm_params.params);
 		return -EINVAL;
 	}
-	cd->params = pcm_params.params;
 
-#ifdef CONFIG_HOST_PTABLE
+#if CONFIG_HOST_PTABLE
+	cd = pcm_dev->cd;
 
 	/*
 	 * walk in both directions to check if the pipeline is hostless
@@ -252,19 +264,28 @@ static int ipc_stream_pcm_params(uint32_t stream)
 	host = (struct sof_ipc_comp_host *)&cd->comp;
 	if (IPC_IS_SIZE_INVALID(host->config)) {
 		IPC_SIZE_ERROR_TRACE(TRACE_CLASS_IPC, host->config);
+		err = -EINVAL;
 		goto error;
 	}
 
-	err = ipc_process_host_buffer(_ipc, &pcm_params.params.buffer,
+	err = ipc_process_host_buffer(ipc, &pcm_params.params.buffer,
 				      host->direction,
 				      &elem_array,
 				      &ring_size);
 	if (err < 0)
 		goto error;
 
-	err = comp_host_buffer(cd, &elem_array, ring_size);
+	err = comp_set_attribute(cd, COMP_ATTR_HOST_BUFFER, &elem_array);
 	if (err < 0) {
 		trace_ipc_error("ipc: comp %d host buffer failed %d",
+				pcm_params.comp_id, err);
+		goto error;
+	}
+
+	/* TODO: should be extracted to platform specific code */
+	err = comp_set_attribute(cd, COMP_ATTR_COPY_TYPE, &copy_type);
+	if (err < 0) {
+		trace_ipc_error("ipc: comp %d setting copy type failed %d",
 				pcm_params.comp_id, err);
 		goto error;
 	}
@@ -274,7 +295,7 @@ pipe_params:
 
 	/* configure pipeline audio params */
 	err = pipeline_params(pcm_dev->cd->pipeline, pcm_dev->cd,
-			      (struct sof_ipc_pcm_params *)_ipc->comp_data);
+			(struct sof_ipc_pcm_params *)ipc_get()->comp_data);
 	if (err < 0) {
 		trace_ipc_error("ipc: pipe %d comp %d params failed %d",
 				pcm_dev->cd->pipeline->ipc_pipe.pipeline_id,
@@ -291,48 +312,49 @@ pipe_params:
 		goto error;
 	}
 
-	posn_offset = ipc_get_posn_offset(_ipc, pcm_dev->cd->pipeline);
-	if (posn_offset < 0) {
-		trace_ipc_error("ipc: pipe %d comp %d posn offset failed %d",
-				pcm_dev->cd->pipeline->ipc_pipe.pipeline_id,
-				pcm_params.comp_id, err);
-		goto error;
-	}
 	/* write component values to the outbox */
 	reply.rhdr.hdr.size = sizeof(reply);
 	reply.rhdr.hdr.cmd = stream;
 	reply.rhdr.error = 0;
 	reply.comp_id = pcm_params.comp_id;
-	reply.posn_offset = posn_offset;
+	reply.posn_offset = pcm_dev->cd->pipeline->posn_offset;
 	mailbox_hostbox_write(0, &reply, sizeof(reply));
+	platform_shared_commit(pcm_dev, sizeof(*pcm_dev));
 	return 1;
 
 error:
-	err = pipeline_reset(pcm_dev->cd->pipeline, pcm_dev->cd);
-	if (err < 0)
+	reset_err = pipeline_reset(pcm_dev->cd->pipeline, pcm_dev->cd);
+	if (reset_err < 0)
 		trace_ipc_error("ipc: pipe %d comp %d reset failed %d",
 				pcm_dev->cd->pipeline->ipc_pipe.pipeline_id,
-				pcm_params.comp_id, err);
-	return -EINVAL;
+				pcm_params.comp_id, reset_err);
+	platform_shared_commit(pcm_dev, sizeof(*pcm_dev));
+	return err;
 }
 
 /* free stream resources */
 static int ipc_stream_pcm_free(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_stream free_req;
 	struct ipc_comp_dev *pcm_dev;
+	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(free_req, _ipc->comp_data);
-
-	trace_ipc("ipc: comp %d -> free", free_req.comp_id);
+	IPC_COPY_CMD(free_req, ipc->comp_data);
 
 	/* get the pcm_dev */
-	pcm_dev = ipc_get_comp(_ipc, free_req.comp_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, free_req.comp_id);
 	if (pcm_dev == NULL) {
 		trace_ipc_error("ipc: comp %d not found", free_req.comp_id);
 		return -ENODEV;
 	}
+
+	/* check core */
+	if (!cpu_is_me(pcm_dev->core))
+		return ipc_process_on_core(pcm_dev->core);
+
+	trace_ipc("ipc: comp %d -> free", free_req.comp_id);
 
 	/* sanity check comp */
 	if (pcm_dev->cd->pipeline == NULL) {
@@ -342,29 +364,38 @@ static int ipc_stream_pcm_free(uint32_t header)
 	}
 
 	/* reset the pipeline */
-	return pipeline_reset(pcm_dev->cd->pipeline, pcm_dev->cd);
+	ret = pipeline_reset(pcm_dev->cd->pipeline, pcm_dev->cd);
+
+	platform_shared_commit(pcm_dev, sizeof(*pcm_dev));
+
+	return ret;
 }
 
 /* get stream position */
 static int ipc_stream_position(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_stream stream;
 	struct sof_ipc_stream_posn posn;
 	struct ipc_comp_dev *pcm_dev;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(stream, _ipc->comp_data);
-
-	trace_ipc("ipc: comp %d -> position", stream.comp_id);
-
-	memset(&posn, 0, sizeof(posn));
+	IPC_COPY_CMD(stream, ipc->comp_data);
 
 	/* get the pcm_dev */
-	pcm_dev = ipc_get_comp(_ipc, stream.comp_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, stream.comp_id);
 	if (pcm_dev == NULL) {
 		trace_ipc_error("ipc: comp %d not found", stream.comp_id);
 		return -ENODEV;
 	}
+
+	/* check core */
+	if (!cpu_is_me(pcm_dev->core))
+		return ipc_process_on_core(pcm_dev->core);
+
+	trace_ipc("ipc: comp %d -> position", stream.comp_id);
+
+	memset(&posn, 0, sizeof(posn));
 
 	/* set message fields - TODO; get others */
 	posn.rhdr.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_POSITION |
@@ -379,54 +410,14 @@ static int ipc_stream_position(uint32_t header)
 	mailbox_stream_write(pcm_dev->cd->pipeline->posn_offset,
 			     &posn, sizeof(posn));
 
+	platform_shared_commit(pcm_dev, sizeof(*pcm_dev));
+
 	return 1;
-}
-
-/* send stream position */
-int ipc_stream_send_position(struct comp_dev *cdev,
-	struct sof_ipc_stream_posn *posn)
-{
-	posn->rhdr.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_POSITION |
-		cdev->comp.id;
-	posn->rhdr.hdr.size = sizeof(*posn);
-	posn->comp_id = cdev->comp.id;
-
-	mailbox_stream_write(cdev->pipeline->posn_offset, posn, sizeof(*posn));
-	return ipc_queue_host_message(_ipc, posn->rhdr.hdr.cmd, posn,
-				      sizeof(*posn), 0);
-}
-
-/* send component notification */
-int ipc_send_comp_notification(struct comp_dev *cdev,
-			       struct sof_ipc_comp_event *event)
-{
-	event->rhdr.hdr.cmd = SOF_IPC_GLB_COMP_MSG |
-		SOF_IPC_COMP_NOTIFICATION | cdev->comp.id;
-	event->rhdr.hdr.size = sizeof(*event);
-	event->src_comp_type = cdev->comp.type;
-	event->src_comp_id = cdev->comp.id;
-
-	return ipc_queue_host_message(_ipc, event->rhdr.hdr.cmd, event,
-				      sizeof(*event), 0);
-}
-
-/* send stream position TODO: send compound message  */
-int ipc_stream_send_xrun(struct comp_dev *cdev,
-	struct sof_ipc_stream_posn *posn)
-{
-	posn->rhdr.hdr.cmd = SOF_IPC_GLB_STREAM_MSG |
-			     SOF_IPC_STREAM_TRIG_XRUN |
-			     cdev->comp.id;
-	posn->rhdr.hdr.size = sizeof(*posn);
-	posn->comp_id = cdev->comp.id;
-
-	mailbox_stream_write(cdev->pipeline->posn_offset, posn, sizeof(*posn));
-	return ipc_queue_host_message(_ipc, posn->rhdr.hdr.cmd, posn,
-				      sizeof(*posn), 0);
 }
 
 static int ipc_stream_trigger(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct ipc_comp_dev *pcm_dev;
 	struct sof_ipc_stream stream;
 	uint32_t ipc_cmd = iCS(header);
@@ -434,16 +425,20 @@ static int ipc_stream_trigger(uint32_t header)
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(stream, _ipc->comp_data);
-
-	trace_ipc("ipc: comp %d -> trigger cmd 0x%x", stream.comp_id, ipc_cmd);
+	IPC_COPY_CMD(stream, ipc->comp_data);
 
 	/* get the pcm_dev */
-	pcm_dev = ipc_get_comp(_ipc, stream.comp_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, stream.comp_id);
 	if (pcm_dev == NULL) {
 		trace_ipc_error("ipc: comp %d not found", stream.comp_id);
 		return -ENODEV;
 	}
+
+	/* check core */
+	if (!cpu_is_me(pcm_dev->core))
+		return ipc_process_on_core(pcm_dev->core);
+
+	trace_ipc("ipc: comp %d -> trigger cmd 0x%x", stream.comp_id, ipc_cmd);
 
 	switch (ipc_cmd) {
 	case SOF_IPC_STREAM_TRIG_START:
@@ -472,6 +467,8 @@ static int ipc_stream_trigger(uint32_t header)
 		trace_ipc_error("ipc: comp %d trigger 0x%x failed %d",
 				stream.comp_id, ipc_cmd, ret);
 	}
+
+	platform_shared_commit(pcm_dev, sizeof(*pcm_dev));
 
 	return ret;
 }
@@ -506,37 +503,18 @@ static int ipc_glb_stream_message(uint32_t header)
 
 static int ipc_dai_config(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_dai_config config;
-	struct dai *dai;
-	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(config, _ipc->comp_data);
+	IPC_COPY_CMD(config, ipc->comp_data);
 
-	trace_ipc("ipc: dai %d,%d -> config ", config.type,
+	trace_ipc("ipc: dai %d.%d -> config ", config.type,
 		  config.dai_index);
 
-	/* get DAI */
-	dai = dai_get(config.type, config.dai_index, 0 /* existing only */);
-	if (dai == NULL) {
-		trace_ipc_error("ipc: dai %d,%d not found",
-				config.type, config.dai_index);
-		return -ENODEV;
-	}
-
-	/* configure DAI */
-	ret = dai_set_config(dai,
-			     (struct sof_ipc_dai_config *)_ipc->comp_data);
-	dai_put(dai); /* free ref immediately */
-	if (ret < 0) {
-		trace_ipc_error("ipc: dai %d,%d config failed %d",
-				config.type, config.dai_index, ret);
-		return ret;
-	}
-
-	/* now send params to all DAI components who use that physical DAI */
-	return ipc_comp_dai_config(_ipc,
-				  (struct sof_ipc_dai_config *)_ipc->comp_data);
+	/* send params to all DAI components who use that physical DAI */
+	return ipc_comp_dai_config(ipc,
+				   (struct sof_ipc_dai_config *)ipc->comp_data);
 }
 
 static int ipc_glb_dai_message(uint32_t header)
@@ -595,7 +573,7 @@ static int ipc_pm_context_save(uint32_t header)
 	/* TODO: clear any outstanding platform IRQs - TODO refine */
 
 	/* TODO: stop ALL timers */
-	platform_timer_stop(platform_timer);
+	platform_timer_stop(timer_get());
 
 	/* TODO: disable SSP and DMA HW */
 
@@ -605,7 +583,7 @@ static int ipc_pm_context_save(uint32_t header)
 	/* write the context to the host driver */
 	//mailbox_hostbox_write(0, pm_ctx, sizeof(*pm_ctx));
 
-	_ipc->pm_prepare_D3 = 1;
+	ipc_get()->pm_prepare_D3 = 1;
 
 	return 0;
 }
@@ -615,6 +593,8 @@ static int ipc_pm_context_restore(uint32_t header)
 	//struct sof_ipc_pm_ctx *pm_ctx = _ipc->comp_data;
 
 	trace_ipc("ipc: pm -> restore");
+
+	ipc_get()->pm_prepare_D3 = 0;
 
 	/* restore context placeholder */
 	//mailbox_hostbox_write(0, pm_ctx, sizeof(*pm_ctx));
@@ -628,7 +608,7 @@ static int ipc_pm_core_enable(uint32_t header)
 	int i = 0;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(pm_core_config, _ipc->comp_data);
+	IPC_COPY_CMD(pm_core_config, ipc_get()->comp_data);
 
 	trace_ipc("ipc: pm core mask 0x%x -> enable",
 		  pm_core_config.enable_mask);
@@ -641,6 +621,28 @@ static int ipc_pm_core_enable(uint32_t header)
 				cpu_disable_core(i);
 		}
 	}
+
+	return 0;
+}
+
+static int ipc_pm_gate(uint32_t header)
+{
+	struct sof_ipc_pm_gate pm_gate;
+
+	IPC_COPY_CMD(pm_gate, ipc_get()->comp_data);
+
+	/* pause dma trace firstly if needed */
+	if (pm_gate.flags & SOF_PM_NO_TRACE)
+		trace_off();
+
+	if (pm_gate.flags & SOF_PM_PPG)
+		pm_runtime_disable(PM_RUNTIME_DSP, PLATFORM_MASTER_CORE_ID);
+	else
+		pm_runtime_enable(PM_RUNTIME_DSP, PLATFORM_MASTER_CORE_ID);
+
+	/* resume dma trace if needed */
+	if (!(pm_gate.flags & SOF_PM_NO_TRACE))
+		trace_on();
 
 	return 0;
 }
@@ -658,6 +660,8 @@ static int ipc_glb_pm_message(uint32_t header)
 		return ipc_pm_context_size(header);
 	case SOF_IPC_PM_CORE_ENABLE:
 		return ipc_pm_core_enable(header);
+	case SOF_IPC_PM_GATE:
+		return ipc_pm_gate(header);
 	case SOF_IPC_PM_CLK_SET:
 	case SOF_IPC_PM_CLK_GET:
 	case SOF_IPC_PM_CLK_REQ:
@@ -673,34 +677,39 @@ static int ipc_glb_pm_message(uint32_t header)
  */
 static int ipc_dma_trace_config(uint32_t header)
 {
-#ifdef CONFIG_HOST_PTABLE
+#if CONFIG_HOST_PTABLE
 	struct dma_sg_elem_array elem_array;
 	uint32_t ring_size;
 #endif
+	struct dma_trace_data *dmat = dma_trace_data_get();
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_dma_trace_params_ext params;
+	struct timer *timer = timer_get();
 	int err;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(params, _ipc->comp_data);
+	IPC_COPY_CMD(params, ipc->comp_data);
 
 	if (iCS(header) == SOF_IPC_TRACE_DMA_PARAMS_EXT)
-		platform_timer_set_delta(platform_timer, params.timestamp_ns);
+		platform_timer_set_delta(timer, params.timestamp_ns);
 	else
-		platform_timer->delta = 0;
+		timer->delta = 0;
 
-#ifdef CONFIG_SUECREEK
+	platform_shared_commit(timer, sizeof(*timer));
+
+#if CONFIG_SUECREEK
 	return 0;
 #endif
 
-#ifdef CONFIG_HOST_PTABLE
-	err = ipc_process_host_buffer(_ipc, &params.buffer,
+#if CONFIG_HOST_PTABLE
+	err = ipc_process_host_buffer(ipc, &params.buffer,
 				      SOF_IPC_STREAM_CAPTURE,
 				      &elem_array,
 				      &ring_size);
 	if (err < 0)
 		goto error;
 
-	err = dma_trace_host_buffer(_ipc->dmat, &elem_array, ring_size);
+	err = dma_trace_host_buffer(dmat, &elem_array, ring_size);
 	if (err < 0) {
 		trace_ipc_error("ipc: trace failed to set host buffers %d",
 				err);
@@ -708,13 +717,13 @@ static int ipc_dma_trace_config(uint32_t header)
 	}
 #else
 	/* stream tag of capture stream for DMA trace */
-	_ipc->dmat->stream_tag = params.stream_tag;
+	dmat->stream_tag = params.stream_tag;
 
 	/* host buffer size for DMA trace */
-	_ipc->dmat->host_size = params.buffer.size;
+	dmat->host_size = params.buffer.size;
 #endif
 
-	err = dma_trace_enable(_ipc->dmat);
+	err = dma_trace_enable(dmat);
 	if (err < 0) {
 		trace_ipc_error("ipc: failed to enable trace %d", err);
 		goto error;
@@ -723,22 +732,7 @@ static int ipc_dma_trace_config(uint32_t header)
 	return 0;
 
 error:
-	return -EINVAL;
-}
-
-/* send DMA trace host buffer position to host */
-int ipc_dma_trace_send_position(void)
-{
-	struct sof_ipc_dma_trace_posn posn;
-
-	posn.rhdr.hdr.cmd =  SOF_IPC_GLB_TRACE_MSG | SOF_IPC_TRACE_DMA_POSITION;
-	posn.host_offset = _ipc->dmat->host_offset;
-	posn.overflow = _ipc->dmat->overflow;
-	posn.messages = _ipc->dmat->messages;
-	posn.rhdr.hdr.size = sizeof(posn);
-
-	return ipc_queue_host_message(_ipc, posn.rhdr.hdr.cmd, &posn,
-				      sizeof(posn), 1);
+	return err;
 }
 
 static int ipc_glb_debug_message(uint32_t header)
@@ -770,11 +764,12 @@ static int ipc_glb_gdb_debug(uint32_t header)
 	/* no furher information needs to be extracted form header */
 	(void) header;
 
-#ifdef CONFIG_GDB_DEBUG
+#if CONFIG_GDB_DEBUG
 	gdb_init_debug_exception();
 	gdb_init();
-	/* TODO: this asm should be in arch/include/debug.h with a generic */
-	/* name and trigger debug exception */
+	/* TODO: this asm should be in arch/include/debug/debug.h
+	 * with a generic name and trigger debug exception
+	 */
 	asm volatile("_break 0, 0");
 	return 0;
 #else
@@ -783,61 +778,232 @@ static int ipc_glb_gdb_debug(uint32_t header)
 
 }
 
+#if CONFIG_PROBE
+static inline int ipc_probe_init(uint32_t header)
+{
+	struct sof_ipc_probe_dma_add_params *params = ipc_get()->comp_data;
+	int dma_provided = params->num_elems;
+
+	tracev_ipc("ipc_probe_init()");
+
+	if (dma_provided > 1 || dma_provided < 0) {
+		trace_ipc_error("ipc_probe_init() error: Invalid amount of extraction DMAs specified = %d",
+				dma_provided);
+		return -EINVAL;
+	}
+
+	return probe_init(dma_provided ? params->probe_dma : NULL);
+}
+
+static inline int ipc_probe_deinit(uint32_t header)
+{
+	tracev_ipc("ipc_probe_deinit()");
+
+	return probe_deinit();
+}
+
+static inline int ipc_probe_dma_add(uint32_t header)
+{
+	struct sof_ipc_probe_dma_add_params *params = ipc_get()->comp_data;
+	int dmas_count = params->num_elems;
+
+	tracev_ipc("ipc_probe_dma_add()");
+
+	if (dmas_count > CONFIG_PROBE_DMA_MAX) {
+		trace_ipc_error("ipc_probe_dma_add() error: Invalid amount of injection DMAs specified = %d. Max is " META_QUOTE(CONFIG_PROBE_DMA_MAX) ".",
+				dmas_count);
+		return -EINVAL;
+	}
+
+	if (dmas_count <= 0) {
+		trace_ipc_error("ipc_probe_dma_add() error: Inferred amount of incjection DMAs in payload is %d. This could indicate corrupt size reported in header or invalid IPC payload.",
+				dmas_count);
+		return -EINVAL;
+	}
+
+	return probe_dma_add(dmas_count, params->probe_dma);
+}
+
+static inline int ipc_probe_dma_remove(uint32_t header)
+{
+	struct sof_ipc_probe_dma_remove_params *params = ipc_get()->comp_data;
+	int tags_count = params->num_elems;
+
+	tracev_ipc("ipc_probe_dma_remove()");
+
+	if (tags_count > CONFIG_PROBE_DMA_MAX) {
+		trace_ipc_error("ipc_probe_dma_remove() error: Invalid amount of injection DMAs specified = %d. Max is " META_QUOTE(CONFIG_PROBE_DMA_MAX) ".",
+				tags_count);
+		return -EINVAL;
+	}
+
+	if (tags_count <= 0) {
+		trace_ipc_error("ipc_probe_dma_remove() error: Inferred amount of incjection DMAs in payload is %d. This could indicate corrupt size reported in header or invalid IPC payload.",
+				tags_count);
+		return -EINVAL;
+	}
+
+	return probe_dma_remove(tags_count, params->stream_tag);
+}
+
+static inline int ipc_probe_point_add(uint32_t header)
+{
+	struct sof_ipc_probe_point_add_params *params = ipc_get()->comp_data;
+	int probes_count = params->num_elems;
+
+	tracev_ipc("ipc_probe_point_add()");
+
+	if (probes_count > CONFIG_PROBE_POINTS_MAX) {
+		trace_ipc_error("ipc_probe_point_add() error: Invalid amount of Probe Points specified = %d. Max is " META_QUOTE(CONFIG_PROBE_POINT_MAX) ".",
+				probes_count);
+		return -EINVAL;
+	}
+
+	if (probes_count <= 0) {
+		trace_ipc_error("ipc_probe_point_add() error: Inferred amount of Probe Points in payload is %d. This could indicate corrupt size reported in header or invalid IPC payload.",
+				probes_count);
+		return -EINVAL;
+	}
+
+	return probe_point_add(probes_count, params->probe_point);
+}
+
+static inline int ipc_probe_point_remove(uint32_t header)
+{
+	struct sof_ipc_probe_point_remove_params *params = ipc_get()->comp_data;
+	int probes_count = params->num_elems;
+
+	tracev_ipc("ipc_probe_point_remove()");
+
+	if (probes_count > CONFIG_PROBE_POINTS_MAX) {
+		trace_ipc_error("ipc_probe_point_remove() error: Invalid amount of Probe Points specified = %d. Max is " META_QUOTE(CONFIG_PROBE_POINT_MAX) ".",
+				probes_count);
+		return -EINVAL;
+	}
+
+	if (probes_count <= 0) {
+		trace_ipc_error("ipc_probe_point_remove() error: Inferred amount of Probe Points in payload is %d. This could indicate corrupt size reported in header or invalid IPC payload.",
+				probes_count);
+		return -EINVAL;
+	}
+	return probe_point_remove(probes_count, params->buffer_id);
+}
+
+static int ipc_probe_info(uint32_t header)
+{
+	uint32_t cmd = iCS(header);
+	struct sof_ipc_probe_info_params *params = ipc_get()->comp_data;
+	int ret;
+
+	tracev_ipc("ipc_probe_get_data()");
+
+	switch (cmd) {
+	case SOF_IPC_PROBE_DMA_INFO:
+		ret = probe_dma_info(params, SOF_IPC_MSG_MAX_SIZE);
+		break;
+	case SOF_IPC_PROBE_POINT_INFO:
+		ret = probe_point_info(params, SOF_IPC_MSG_MAX_SIZE);
+		break;
+	default:
+		trace_ipc_error("ipc_probe_info() error: Invalid probe INFO command = %u",
+				cmd);
+		ret = -EINVAL;
+	}
+
+	if (ret < 0) {
+		trace_ipc_error("ipc_probe_info() error: cmd %u failed", cmd);
+		return ret;
+	}
+
+	/* write data to the outbox */
+	if (params->rhdr.hdr.size <= MAILBOX_HOSTBOX_SIZE &&
+	    params->rhdr.hdr.size <= SOF_IPC_MSG_MAX_SIZE) {
+		mailbox_hostbox_write(0, params, params->rhdr.hdr.size);
+		ret = 1;
+	} else {
+		trace_ipc_error("ipc_probe_get_data() error: probes module returned too much payload for cmd %u - returned %d bytes, max %d",
+				cmd, params->rhdr.hdr.size,
+				MIN(MAILBOX_HOSTBOX_SIZE,
+				    SOF_IPC_MSG_MAX_SIZE));
+		ret = -EINVAL;
+	}
+
+	return ret;
+}
+
+static int ipc_glb_probe(uint32_t header)
+{
+	uint32_t cmd = iCS(header);
+
+	tracev_ipc("ipc: probe cmd 0x%x", cmd);
+
+	switch (cmd) {
+	case SOF_IPC_PROBE_INIT:
+		return ipc_probe_init(header);
+	case SOF_IPC_PROBE_DEINIT:
+		return ipc_probe_deinit(header);
+	case SOF_IPC_PROBE_DMA_ADD:
+		return ipc_probe_dma_add(header);
+	case SOF_IPC_PROBE_DMA_REMOVE:
+		return ipc_probe_dma_remove(header);
+	case SOF_IPC_PROBE_POINT_ADD:
+		return ipc_probe_point_add(header);
+	case SOF_IPC_PROBE_POINT_REMOVE:
+		return ipc_probe_point_remove(header);
+	case SOF_IPC_PROBE_DMA_INFO:
+	case SOF_IPC_PROBE_POINT_INFO:
+		return ipc_probe_info(header);
+	default:
+		trace_ipc_error("ipc: unknown probe cmd 0x%x", cmd);
+		return -EINVAL;
+	}
+}
+#else
+static inline int ipc_glb_probe(uint32_t header)
+{
+	trace_ipc_error("ipc_glb_probe() error: Probes not enabled by Kconfig.");
+
+	return -EINVAL;
+}
+#endif
+
 /*
  * Topology IPC Operations.
  */
 
-static int ipc_comp_cmd(struct comp_dev *dev, int cmd,
-			struct sof_ipc_ctrl_data *data, int size)
-{
-	struct idc_msg comp_cmd_msg;
-
-	/* pipeline running on other core */
-	if (dev->pipeline && dev->pipeline->status == COMP_STATE_ACTIVE &&
-	    cpu_get_id() != dev->pipeline->ipc_pipe.core) {
-
-		/* check if requested core is enabled */
-		if (!cpu_is_core_enabled(dev->pipeline->ipc_pipe.core))
-			return -EINVAL;
-
-		/* build IDC message */
-		comp_cmd_msg.header = IDC_MSG_COMP_CMD;
-		comp_cmd_msg.extension = IDC_MSG_COMP_CMD_EXT(cmd);
-		comp_cmd_msg.core = dev->pipeline->ipc_pipe.core;
-
-		/* send IDC component command message */
-		return idc_send_msg(&comp_cmd_msg, IDC_BLOCKING);
-	} else {
-		return comp_cmd(dev, cmd, data, size);
-	}
-}
-
 /* get/set component values or runtime data */
 static int ipc_comp_value(uint32_t header, uint32_t cmd)
 {
+	struct ipc *ipc = ipc_get();
 	struct ipc_comp_dev *comp_dev;
-	struct sof_ipc_ctrl_data data, *_data = _ipc->comp_data;
+	struct sof_ipc_ctrl_data data, *_data = ipc->comp_data;
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(data, _ipc->comp_data);
-
-	trace_ipc("ipc: comp %d -> cmd %d", data.comp_id, data.cmd);
+	IPC_COPY_CMD(data, ipc->comp_data);
 
 	/* get the component */
-	comp_dev = ipc_get_comp(_ipc, data.comp_id);
+	comp_dev = ipc_get_comp_by_id(ipc, data.comp_id);
 	if (!comp_dev) {
 		trace_ipc_error("ipc: comp %d not found", data.comp_id);
 		return -ENODEV;
 	}
 
+	/* check core */
+	if (!cpu_is_me(comp_dev->core))
+		return ipc_process_on_core(comp_dev->core);
+
+	trace_ipc("ipc: comp %d -> cmd %d", data.comp_id, data.cmd);
+
 	/* get component values */
-	ret = ipc_comp_cmd(comp_dev->cd, cmd, _data, SOF_IPC_MSG_MAX_SIZE);
+	ret = comp_cmd(comp_dev->cd, cmd, _data, SOF_IPC_MSG_MAX_SIZE);
 	if (ret < 0) {
 		trace_ipc_error("ipc: comp %d cmd %u failed %d", data.comp_id,
 				data.cmd, ret);
 		return ret;
 	}
+
+	platform_shared_commit(comp_dev, sizeof(*comp_dev));
 
 	/* write component values to the outbox */
 	if (_data->rhdr.hdr.size <= MAILBOX_HOSTBOX_SIZE &&
@@ -876,18 +1042,23 @@ static int ipc_glb_comp_message(uint32_t header)
 
 static int ipc_glb_tplg_comp_new(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_comp comp;
 	struct sof_ipc_comp_reply reply;
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(comp, _ipc->comp_data);
+	IPC_COPY_CMD(comp, ipc->comp_data);
+
+	/* check core */
+	if (!cpu_is_me(comp.core))
+		return ipc_process_on_core(comp.core);
 
 	trace_ipc("ipc: pipe %d comp %d -> new (type %d)", comp.pipeline_id,
 		  comp.id, comp.type);
 
 	/* register component */
-	ret = ipc_comp_new(_ipc, (struct sof_ipc_comp *)_ipc->comp_data);
+	ret = ipc_comp_new(ipc, (struct sof_ipc_comp *)ipc->comp_data);
 	if (ret < 0) {
 		trace_ipc_error("ipc: pipe %d comp %d creation failed %d",
 				comp.pipeline_id, comp.id, ret);
@@ -905,18 +1076,23 @@ static int ipc_glb_tplg_comp_new(uint32_t header)
 
 static int ipc_glb_tplg_buffer_new(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_buffer ipc_buffer;
 	struct sof_ipc_comp_reply reply;
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(ipc_buffer, _ipc->comp_data);
+	IPC_COPY_CMD(ipc_buffer, ipc->comp_data);
+
+	/* check core */
+	if (!cpu_is_me(ipc_buffer.comp.core))
+		return ipc_process_on_core(ipc_buffer.comp.core);
 
 	trace_ipc("ipc: pipe %d buffer %d -> new (0x%x bytes)",
 		  ipc_buffer.comp.pipeline_id, ipc_buffer.comp.id,
 		  ipc_buffer.size);
 
-	ret = ipc_buffer_new(_ipc, (struct sof_ipc_buffer *)_ipc->comp_data);
+	ret = ipc_buffer_new(ipc, (struct sof_ipc_buffer *)ipc->comp_data);
 	if (ret < 0) {
 		trace_ipc_error("ipc: pipe %d buffer %d creation failed %d",
 				ipc_buffer.comp.pipeline_id,
@@ -935,17 +1111,22 @@ static int ipc_glb_tplg_buffer_new(uint32_t header)
 
 static int ipc_glb_tplg_pipe_new(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_pipe_new ipc_pipeline;
 	struct sof_ipc_comp_reply reply;
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(ipc_pipeline, _ipc->comp_data);
+	IPC_COPY_CMD(ipc_pipeline, ipc->comp_data);
+
+	/* check core */
+	if (!cpu_is_me(ipc_pipeline.core))
+		return ipc_process_on_core(ipc_pipeline.core);
 
 	trace_ipc("ipc: pipe %d -> new", ipc_pipeline.pipeline_id);
 
-	ret = ipc_pipeline_new(_ipc,
-			       (struct sof_ipc_pipe_new *)_ipc->comp_data);
+	ret = ipc_pipeline_new(ipc,
+			       (struct sof_ipc_pipe_new *)ipc->comp_data);
 	if (ret < 0) {
 		trace_ipc_error("ipc: pipe %d creation failed %d",
 				ipc_pipeline.pipeline_id, ret);
@@ -963,43 +1144,41 @@ static int ipc_glb_tplg_pipe_new(uint32_t header)
 
 static int ipc_glb_tplg_pipe_complete(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_pipe_ready ipc_pipeline;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(ipc_pipeline, _ipc->comp_data);
+	IPC_COPY_CMD(ipc_pipeline, ipc->comp_data);
 
-	trace_ipc("ipc: pipe %d -> complete", ipc_pipeline.comp_id);
-
-	return ipc_pipeline_complete(_ipc, ipc_pipeline.comp_id);
+	return ipc_pipeline_complete(ipc, ipc_pipeline.comp_id);
 }
 
 static int ipc_glb_tplg_comp_connect(uint32_t header)
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_pipe_comp_connect connect;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(connect, _ipc->comp_data);
+	IPC_COPY_CMD(connect, ipc->comp_data);
 
-	trace_ipc("ipc: comp sink %d, source %d  -> connect",
-		  connect.sink_id, connect.source_id);
-
-	return ipc_comp_connect(_ipc,
-			(struct sof_ipc_pipe_comp_connect *)_ipc->comp_data);
+	return ipc_comp_connect(ipc,
+			(struct sof_ipc_pipe_comp_connect *)ipc->comp_data);
 }
 
 static int ipc_glb_tplg_free(uint32_t header,
 		int (*free_func)(struct ipc *ipc, uint32_t id))
 {
+	struct ipc *ipc = ipc_get();
 	struct sof_ipc_free ipc_free;
 	int ret;
 
 	/* copy message with ABI safe method */
-	IPC_COPY_CMD(ipc_free, _ipc->comp_data);
+	IPC_COPY_CMD(ipc_free, ipc->comp_data);
 
 	trace_ipc("ipc: comp %d -> free", ipc_free.id);
 
 	/* free the object */
-	ret = free_func(_ipc, ipc_free.id);
+	ret = free_func(ipc, ipc_free.id);
 
 	if (ret < 0) {
 		trace_ipc_error("ipc: comp %d free failed %d",
@@ -1036,7 +1215,7 @@ static int ipc_glb_tplg_message(uint32_t header)
 	}
 }
 
-#ifdef CONFIG_DEBUG
+#if CONFIG_DEBUG
 static int ipc_glb_test_message(uint32_t header)
 {
 	uint32_t cmd = iCS(header);
@@ -1055,206 +1234,118 @@ static int ipc_glb_test_message(uint32_t header)
  * Global IPC Operations.
  */
 
-int ipc_cmd(void)
+void ipc_cmd(struct sof_ipc_cmd_hdr *hdr)
 {
-	struct sof_ipc_cmd_hdr *hdr;
-	uint32_t type;
+	struct sof_ipc_reply reply;
+	uint32_t type = 0;
+	int ret;
 
-	hdr = mailbox_validate();
 	if (hdr == NULL) {
 		trace_ipc_error("ipc: invalid IPC header.");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	type = iGS(hdr->cmd);
 
 	switch (type) {
 	case SOF_IPC_GLB_REPLY:
-		return 0;
+		ret = 0;
+		break;
 	case SOF_IPC_GLB_COMPOUND:
-		return -EINVAL;	/* TODO */
+		ret = -EINVAL;	/* TODO */
+		break;
 	case SOF_IPC_GLB_TPLG_MSG:
-		return ipc_glb_tplg_message(hdr->cmd);
+		ret = ipc_glb_tplg_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_PM_MSG:
-		return ipc_glb_pm_message(hdr->cmd);
+		ret = ipc_glb_pm_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_COMP_MSG:
-		return ipc_glb_comp_message(hdr->cmd);
+		ret = ipc_glb_comp_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_STREAM_MSG:
-		return ipc_glb_stream_message(hdr->cmd);
+		ret = ipc_glb_stream_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_DAI_MSG:
-		return ipc_glb_dai_message(hdr->cmd);
+		ret = ipc_glb_dai_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_TRACE_MSG:
-		return ipc_glb_debug_message(hdr->cmd);
+		ret = ipc_glb_debug_message(hdr->cmd);
+		break;
 	case SOF_IPC_GLB_GDB_DEBUG:
-		return ipc_glb_gdb_debug(hdr->cmd);
-#ifdef CONFIG_DEBUG
+		ret = ipc_glb_gdb_debug(hdr->cmd);
+		break;
+	case SOF_IPC_GLB_PROBE:
+		ret = ipc_glb_probe(hdr->cmd);
+		break;
+#if CONFIG_DEBUG
 	case SOF_IPC_GLB_TEST:
-		return ipc_glb_test_message(hdr->cmd);
+		ret = ipc_glb_test_message(hdr->cmd);
+		break;
 #endif
 	default:
 		trace_ipc_error("ipc: unknown command type %u", type);
-		return -EINVAL;
-	}
-}
-
-/* locks held by caller */
-static inline struct ipc_msg *msg_get_empty(struct ipc *ipc)
-{
-	struct ipc_msg *msg = NULL;
-
-	if (!list_is_empty(&ipc->shared_ctx->empty_list)) {
-		msg = list_first_item(&ipc->shared_ctx->empty_list,
-				      struct ipc_msg, list);
-		list_item_del(&msg->list);
-	}
-
-	return msg;
-}
-
-static inline struct ipc_msg *ipc_glb_stream_message_find(struct ipc *ipc,
-	struct sof_ipc_stream_posn *posn)
-{
-	struct list_item *plist;
-	struct ipc_msg *msg = NULL;
-	struct sof_ipc_stream_posn *old_posn = NULL;
-	uint32_t cmd;
-
-	/* Check whether the command is expected */
-	cmd = iCS(posn->rhdr.hdr.cmd);
-
-	switch (cmd) {
-	case SOF_IPC_STREAM_TRIG_XRUN:
-	case SOF_IPC_STREAM_POSITION:
-
-		/* iterate host message list for searching */
-		list_for_item(plist, &ipc->shared_ctx->msg_list) {
-			msg = container_of(plist, struct ipc_msg, list);
-			if (msg->header == posn->rhdr.hdr.cmd) {
-				old_posn = (struct sof_ipc_stream_posn *)
-					   msg->tx_data;
-				if (old_posn->comp_id == posn->comp_id)
-					return msg;
-			}
-		}
-		break;
-	default:
+		ret = -EINVAL;
 		break;
 	}
 
-	/* no match */
-	return NULL;
-}
+	platform_shared_commit(hdr, hdr->size);
 
-static inline struct ipc_msg *ipc_glb_trace_message_find(struct ipc *ipc,
-	struct sof_ipc_dma_trace_posn *posn)
-{
-	struct list_item *plist;
-	struct ipc_msg *msg = NULL;
-	uint32_t cmd;
+out:
+	tracev_ipc("ipc: last request %d returned %d", type, ret);
 
-	/* Check whether the command is expected */
-	cmd = iCS(posn->rhdr.hdr.cmd);
+	/* if ret > 0, reply created and copied by cmd() */
+	if (ret <= 0) {
+		/* send std error/ok reply */
+		reply.error = ret;
 
-	switch (cmd) {
-	case SOF_IPC_TRACE_DMA_POSITION:
-		/* iterate host message list for searching */
-		list_for_item(plist, &ipc->shared_ctx->msg_list) {
-			msg = container_of(plist, struct ipc_msg, list);
-			if (msg->header == posn->rhdr.hdr.cmd)
-				return msg;
-		}
-		break;
-	default:
-		break;
-	}
-
-	/* no match */
-	return NULL;
-}
-
-static inline struct ipc_msg *msg_find(struct ipc *ipc, uint32_t header,
-	void *tx_data)
-{
-	uint32_t type;
-
-	/* use different sub function for different global message type */
-	type = iGS(header);
-
-	switch (type) {
-	case SOF_IPC_GLB_STREAM_MSG:
-		return ipc_glb_stream_message_find(ipc,
-			(struct sof_ipc_stream_posn *)tx_data);
-	case SOF_IPC_GLB_TRACE_MSG:
-		return ipc_glb_trace_message_find(ipc,
-			(struct sof_ipc_dma_trace_posn *)tx_data);
-	default:
-		/* not found */
-		return NULL;
+		reply.hdr.cmd = SOF_IPC_GLB_REPLY;
+		reply.hdr.size = sizeof(reply);
+		mailbox_hostbox_write(0, &reply, sizeof(reply));
 	}
 }
 
-int ipc_queue_host_message(struct ipc *ipc, uint32_t header, void *tx_data,
-			   size_t tx_bytes, uint32_t replace)
+void ipc_msg_send(struct ipc_msg *msg, void *data, bool high_priority)
 {
-	struct ipc_msg *msg = NULL;
-	uint32_t flags, found = 0;
-	int ret = 0;
+	struct ipc *ipc = ipc_get();
+	uint32_t flags;
+	int ret;
 
 	spin_lock_irq(&ipc->lock, flags);
 
-	/* do we need to replace an existing message? */
-	if (replace)
-		msg = msg_find(ipc, header, tx_data);
-
-	/* do we need to use a new empty message? */
-	if (msg)
-		found = 1;
-	else
-		msg = msg_get_empty(ipc);
-
-	if (msg == NULL) {
-		trace_ipc_error("ipc: msg hdr for 0x%08x not found "
-				"replace %d", header, replace);
-		ret = -EBUSY;
-		goto out;
+	/* copy mailbox data to message */
+	if (msg->tx_size > 0 && msg->tx_size < SOF_IPC_MSG_MAX_SIZE) {
+		ret = memcpy_s(msg->tx_data, msg->tx_size, data, msg->tx_size);
+		assert(!ret);
 	}
 
-	/* prepare the message */
-	msg->header = header;
-	msg->tx_size = tx_bytes;
+	/* try to send critical notifications right away */
+	if (high_priority) {
+		ret = ipc_platform_send_msg(msg);
+		if (!ret)
+			goto out;
+	}
 
-	/* copy mailbox data to message */
-	if (tx_bytes > 0 && tx_bytes < SOF_IPC_MSG_MAX_SIZE)
-		assert(!memcpy_s(msg->tx_data, msg->tx_size, tx_data,
-				 tx_bytes));
-
-	if (!found) {
-		/* now queue the message */
-		ipc->shared_ctx->dsp_pending = 1;
-		list_item_append(&msg->list, &ipc->shared_ctx->msg_list);
+	/* add to queue unless already there */
+	if (list_is_empty(&msg->list)) {
+		if (high_priority)
+			list_item_prepend(&msg->list, &ipc->msg_list);
+		else
+			list_item_append(&msg->list, &ipc->msg_list);
 	}
 
 out:
+	platform_shared_commit(msg->tx_data, msg->tx_size);
+	platform_shared_commit(msg, sizeof(*msg));
+	platform_shared_commit(ipc, sizeof(*ipc));
+
 	spin_unlock_irq(&ipc->lock, flags);
-	return ret;
-}
-
-/* process current message */
-int ipc_process_msg_queue(void)
-{
-	if (_ipc->shared_ctx->dsp_pending)
-		ipc_platform_send_msg(_ipc);
-	return 0;
-}
-
-uint64_t ipc_process_task(void *data)
-{
-	if (_ipc->host_pending)
-		ipc_platform_do_cmd(_ipc);
-	return 0;
 }
 
 void ipc_schedule_process(struct ipc *ipc)
 {
-	schedule_task(&ipc->ipc_task, 0, 100, 0);
+	schedule_task(&ipc->ipc_task, 0, 100);
+
+	platform_shared_commit(ipc, sizeof(*ipc));
 }

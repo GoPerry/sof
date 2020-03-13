@@ -9,14 +9,15 @@ choice
 config BAYTRAIL
 	bool "Build for Baytrail"
 	select HOST_PTABLE
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DMA_SUSPEND_DRAIN
 	select DMA_FIFO_PARTITION
 	select DW
 	select DW_DMA
 	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_4
+	select INTERRUPT_LEVEL_5
 	select INTEL
 	help
 	  Select if your target platform is Baytrail-compatible
@@ -24,14 +25,15 @@ config BAYTRAIL
 config CHERRYTRAIL
 	bool "Build for Cherrytrail"
 	select HOST_PTABLE
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DMA_SUSPEND_DRAIN
 	select DMA_FIFO_PARTITION
 	select DW
 	select DW_DMA
 	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_4
+	select INTERRUPT_LEVEL_5
 	select INTEL
 	help
 	  Select if your target platform is Cherrytrail-compatible
@@ -39,11 +41,13 @@ config CHERRYTRAIL
 config HASWELL
 	bool "Build for Haswell"
 	select HOST_PTABLE
-	select TASK_HAVE_PRIORITY_LOW
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DW
 	select DW_DMA
 	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_3
 	select INTEL
 	help
 	  Select if your target platform is Haswell-compatible
@@ -51,11 +55,13 @@ config HASWELL
 config BROADWELL
 	bool "Build for Broadwell"
 	select HOST_PTABLE
-	select TASK_HAVE_PRIORITY_LOW
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DW
 	select DW_DMA
 	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_3
 	select INTEL
 	help
 	  Select if your target platform is Broadwell-compatible
@@ -68,8 +74,6 @@ config APOLLOLAKE
 	select DW
 	select DW_DMA
 	select MEM_WND
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
 	select HW_LLI
 	select DMA_FIFO_PARTITION
 	select CAVS
@@ -85,13 +89,13 @@ config CANNONLAKE
 	select DW
 	select DW_DMA
 	select MEM_WND
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
 	select HW_LLI
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DMA_FIFO_PARTITION
 	select CAVS
 	select CAVS_VERSION_1_8
+	select WAITI_DELAY
+	select CAVS_USE_LPRO_IN_WAITI
 	help
 	  Select if your target platform is Cannonlake-compatible
 
@@ -101,16 +105,16 @@ config SUECREEK
 	select IRQ_MAP
 	select DW
 	select DW_DMA
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
 	select DW_SPI
 	select INTEL_IOMUX
 	select DW_GPIO
 	select HW_LLI
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DMA_FIFO_PARTITION
 	select CAVS
 	select CAVS_VERSION_2_0
+	select WAITI_DELAY
+	select CAVS_USE_LPRO_IN_WAITI
 	help
 	  Select if your target platform is Suecreek-compatible
 
@@ -122,15 +126,32 @@ config ICELAKE
 	select DW
 	select DW_DMA
 	select MEM_WND
-	select TASK_HAVE_PRIORITY_LOW
-	select TASK_HAVE_PRIORITY_MEDIUM
 	select HW_LLI
-	select DMA_AGGREGATED_IRQ
+	select DW_DMA_AGGREGATED_IRQ
 	select DMA_FIFO_PARTITION
 	select CAVS
 	select CAVS_VERSION_2_0
+	select WAITI_DELAY
+	select CAVS_USE_LPRO_IN_WAITI
 	help
 	  Select if your target platform is Icelake-compatible
+
+config TIGERLAKE
+	bool "Build for Tigerlake"
+	select BOOT_LOADER
+	select IRQ_MAP
+	select DMA_GW
+	select DW
+	select DW_DMA
+	select MEM_WND
+	select HW_LLI
+	select DW_DMA_AGGREGATED_IRQ
+	select DMA_FIFO_PARTITION
+	select CAVS
+	select CAVS_VERSION_2_5
+	select WAITI_DELAY
+	help
+	  Select if your target platform is Tigerlake-compatible
 
 config LIBRARY
 	bool "Build Library"
@@ -143,8 +164,43 @@ config LIBRARY
 config IMX8
 	bool "Build for NXP i.MX8"
 	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_3
+	select HOST_PTABLE
+	select DUMMY_DMA
+	select WAITI_DELAY
+	select IMX
+	select IMX_EDMA
 	help
 	  Select if your target platform is imx8-compatible
+
+config IMX8X
+	bool "Build for NXP i.MX8X"
+	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_3
+	select HOST_PTABLE
+	select DUMMY_DMA
+	select WAITI_DELAY
+	select IMX
+	select IMX_EDMA
+	help
+	  Select if your target platform is imx8x-compatible
+
+config IMX8M
+	bool "Build for NXP i.MX8M"
+	select HAVE_RESET_VECTOR_ROM
+	select INTERRUPT_LEVEL_1
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_3
+	select HOST_PTABLE
+	select DUMMY_DMA
+	select WAITI_DELAY
+	select IMX
+	help
+	  Select if your target platform is imx8m-compatible
 
 endchoice
 
@@ -155,10 +211,19 @@ config INTEL
 	  This has to be selected for every Intel platform.
 	  It enables Intel platforms-specific features.
 
+config IMX
+	bool
+	default n
+	help
+	  This has to be selected for every i.MX NXP platform.
+	  It enables NXP platforms-specific features.
+
 config CAVS
 	bool
 	default n
 	select INTEL
+	select INTERRUPT_LEVEL_2
+	select INTERRUPT_LEVEL_5
 
 config CAVS_VERSION_1_5
 	depends on CAVS
@@ -178,6 +243,38 @@ config CAVS_VERSION_2_0
 	help
 	  Select for CAVS version 2.0
 
+config CAVS_VERSION_2_5
+	depends on CAVS && !CAVS_VERSION_1_5 && !CAVS_VERSION_1_8 \
+			&& !CAVS_VERSION_2_0
+	bool
+	help
+	  Select for CAVS version 2.5
+
+config CONFIG_CHERRYTRAIL_EXTRA_DW_DMA
+	bool "Support Cherrytrail 3rd DMAC"
+	default n if !CHERRYTRAIL
+	depends on CHERRYTRAIL
+	help
+	  Select if you need support for all 3 DMACs versus the default 2 used
+	  in baytrail.
+
+config CAVS_LPRO
+	bool "Enable low power ring oscillator as the default clock"
+	depends on CAVS && !CAVS_VERSION_1_5
+	help
+	  Select if you want to use 120MHz LPRO as the DSP clock source.
+	  This option is required to support S0ix/D0ix mode.
+
+config CAVS_USE_LPRO_IN_WAITI
+	bool
+	default n
+	depends on CAVS
+	select WAKEUP_HOOK
+	help
+	  Select if platform requires DSP clock source to be switched to LPRO
+	  while in waiti.
+	  After waiti clock source is restored.
+
 # TODO: it should just take manifest version and offsets
 config FIRMWARE_SHORT_NAME
 	string "Rimage firmware name"
@@ -189,10 +286,30 @@ config FIRMWARE_SHORT_NAME
 	default "cnl" if CANNONLAKE
 	default "sue" if SUECREEK
 	default "icl" if ICELAKE
+	default "tgl" if TIGERLAKE
 	default "imx8" if IMX8
+	default "imx8x" if IMX8X
+	default "imx8m" if IMX8M
 	default ""
 	help
 	  3-characters long firmware identifer
 	  used by rimage to decide how to build final binary
+
+config SYSTICK_PERIOD
+	int "System tick period in microseconds"
+	default 1000
+	help
+	  Defines platform system tick period. It is used to
+	  drive timer based low latency scheduler and also
+	  as a timeout check value for system agent.
+	  Value should be provided in microseconds.
+
+config HAVE_AGENT
+	bool "Enable system agent"
+	default y
+	help
+	  Enables system agent. It can be disabled on systems
+	  which are still unstable and cannot assure that
+	  system agent will always execute on time.
 
 endmenu

@@ -27,12 +27,18 @@ C_CONTROLMIXER(Master Playback Volume, PIPELINE_ID,
 	Channel register and shift for Front Left/Right,
 	LIST(`	', KCONTROL_CHANNEL(FL, 1, 0), KCONTROL_CHANNEL(FR, 1, 1)))
 
+#
+# Volume configuration
+#
+
+W_VENDORTUPLES(playback_pga_tokens, sof_volume_tokens,
+LIST(`		', `SOF_TKN_VOLUME_RAMP_STEP_TYPE	"0"'
+     `		', `SOF_TKN_VOLUME_RAMP_STEP_MS		"250"'))
+
+W_DATA(playback_pga_conf, playback_pga_tokens)
+
 # EQ initial parameters, in this case flat response
-CONTROLBYTES_PRIV(EQFIR_priv,
-`	bytes "0x18,0x00,0x00,0x00,0x02,0x00,0x01,0x00,'
-`	0x00,0x00,0x00,0x00,0x04,0x00,0xff,0xff,'
-`	0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00"'
-)
+include(`eq_fir_coef_flat.m4')
 
 # EQ Bytes control with max value of 255
 C_CONTROLBYTES(EQFIR, PIPELINE_ID,
@@ -51,21 +57,21 @@ C_CONTROLBYTES(EQFIR, PIPELINE_ID,
 # with 2 sink and 0 source periods
 W_PCM_PLAYBACK(PCM_ID, Passthrough Playback, 2, 0)
 
-# "Volume" has 2 source and 2 sink periods
-W_PGA(0, PIPELINE_FORMAT, 2, 2, LIST(`		', "PIPELINE_ID Master Playback Volume"))
+# "Volume" has 2 source and x sink periods
+W_PGA(0, PIPELINE_FORMAT, DAI_PERIODS, 2, playback_pga_conf, LIST(`		', "PIPELINE_ID Master Playback Volume"))
 
 # "EQ 0" has 2 sink period and 2 source periods
 W_EQ_FIR(0, PIPELINE_FORMAT, 2, 2, LIST(`		', "EQFIR"))
 
 # Playback Buffers
 W_BUFFER(0, COMP_BUFFER_SIZE(2,
-	COMP_SAMPLE_SIZE(PIPELINE_FORMAT), PIPELINE_CHANNELS, SCHEDULE_FRAMES),
+	COMP_SAMPLE_SIZE(PIPELINE_FORMAT), PIPELINE_CHANNELS, COMP_PERIOD_FRAMES(PCM_MAX_RATE, SCHEDULE_PERIOD)),
 	PLATFORM_HOST_MEM_CAP)
 W_BUFFER(1, COMP_BUFFER_SIZE(2,
-	COMP_SAMPLE_SIZE(PIPELINE_FORMAT), PIPELINE_CHANNELS, SCHEDULE_FRAMES),
+	COMP_SAMPLE_SIZE(PIPELINE_FORMAT), PIPELINE_CHANNELS, COMP_PERIOD_FRAMES(PCM_MAX_RATE, SCHEDULE_PERIOD)),
 	PLATFORM_HOST_MEM_CAP)
-W_BUFFER(2, COMP_BUFFER_SIZE(2,
-	COMP_SAMPLE_SIZE(DAI_FORMAT), PIPELINE_CHANNELS, SCHEDULE_FRAMES),
+W_BUFFER(2, COMP_BUFFER_SIZE(DAI_PERIODS,
+	COMP_SAMPLE_SIZE(DAI_FORMAT), PIPELINE_CHANNELS, COMP_PERIOD_FRAMES(PCM_MAX_RATE, SCHEDULE_PERIOD)),
 	PLATFORM_DAI_MEM_CAP)
 
 #
@@ -92,5 +98,5 @@ indir(`define', concat(`PIPELINE_PCM_', PIPELINE_ID), Passthrough Playback PCM_I
 # PCM Configuration
 
 #
-PCM_CAPABILITIES(Passthrough Playback PCM_ID, `S32_LE,S24_LE,S16_LE', 48000, 48000, 2, PIPELINE_CHANNELS, 2, 16, 192, 16384, 65536, 65536)
+PCM_CAPABILITIES(Passthrough Playback PCM_ID, `S32_LE,S24_LE,S16_LE', PCM_MIN_RATE, PCM_MAX_RATE, 2, PIPELINE_CHANNELS, 2, 16, 192, 16384, 65536, 65536)
 

@@ -5,48 +5,79 @@
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
 
-#ifndef __INCLUDE_AUDIO_BUFFER_H__
-#define __INCLUDE_AUDIO_BUFFER_H__
+#ifndef __SOF_AUDIO_BUFFER_H__
+#define __SOF_AUDIO_BUFFER_H__
 
-#include <stdint.h>
-#include <stddef.h>
-#include <sof/lock.h>
+#include <sof/audio/audio_stream.h>
+#include <sof/audio/pipeline.h>
+#include <sof/math/numbers.h>
+#include <sof/common.h>
+#include <sof/debug/panic.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
 #include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/dma.h>
-#include <sof/audio/component.h>
-#include <sof/trace.h>
-#include <sof/schedule.h>
-#include <sof/cache.h>
+#include <sof/math/numbers.h>
+#include <sof/spinlock.h>
+#include <sof/string.h>
+#include <sof/trace/trace.h>
+#include <ipc/stream.h>
 #include <ipc/topology.h>
+#include <user/trace.h>
+#include <sof/audio/format.h>
+#include <config.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-/* pipeline tracing */
+struct comp_dev;
+
+/* buffer tracing */
 #define trace_buffer(__e, ...) \
 	trace_event(TRACE_CLASS_BUFFER, __e, ##__VA_ARGS__)
-#define trace_buffer_error(__e, ...) \
-	trace_error(TRACE_CLASS_BUFFER, __e, ##__VA_ARGS__)
+#define trace_buffer_with_ids(buf_ptr, __e, ...) \
+	trace_event_with_ids(TRACE_CLASS_BUFFER, 0, (buf_ptr)->pipeline_id, \
+			     (buf_ptr)->id, __e, ##__VA_ARGS__)
+
 #define tracev_buffer(__e, ...) \
 	tracev_event(TRACE_CLASS_BUFFER, __e, ##__VA_ARGS__)
+#define tracev_buffer_with_ids(buf_ptr, __e, ...) \
+	tracev_event_with_ids(TRACE_CLASS_BUFFER, 0, (buf_ptr)->pipeline_id, \
+			      (buf_ptr)->id, __e, ##__VA_ARGS__)
+
+#define trace_buffer_error(__e, ...) \
+	trace_error(TRACE_CLASS_BUFFER, __e, ##__VA_ARGS__)
+#define trace_buffer_error_atomic(__e, ...) \
+	trace_error_atomic(TRACE_CLASS_BUFFER, __e, ##__VA_ARGS__)
+#define trace_buffer_error_with_ids(buf_ptr, __e, ...) \
+	trace_error_with_ids(TRACE_CLASS_BUFFER, 0, (buf_ptr)->pipeline_id, \
+			     (buf_ptr)->id, __e, ##__VA_ARGS__)
 
 /* buffer callback types */
 #define BUFF_CB_TYPE_PRODUCE	BIT(0)
 #define BUFF_CB_TYPE_CONSUME	BIT(1)
 
+#define BUFFER_UPDATE_IF_UNSET	0
+#define BUFFER_UPDATE_FORCE	1
+
+/* buffer parameters */
+#define BUFF_PARAMS_FRAME_FMT	BIT(0)
+#define BUFF_PARAMS_BUFFER_FMT	BIT(1)
+#define BUFF_PARAMS_RATE	BIT(2)
+#define BUFF_PARAMS_CHANNELS	BIT(3)
+
 /* audio component buffer - connects 2 audio components together in pipeline */
 struct comp_buffer {
+	spinlock_t *lock;		/* locking mechanism */
 
-	/* runtime data */
-	uint32_t size;	/* runtime buffer size in bytes (period multiple) */
-	uint32_t alloc_size;	/* allocated size in bytes */
-	uint32_t avail;		/* available bytes for reading */
-	uint32_t free;		/* free bytes for writing */
-	void *w_ptr;		/* buffer write pointer */
-	void *r_ptr;		/* buffer read position */
-	void *addr;		/* buffer base address */
-	void *end_addr;		/* buffer end address */
+	/* data buffer */
+	struct audio_stream stream;
 
-	/* IPC configuration */
-	struct sof_ipc_buffer ipc_buffer;
+	/* configuration */
+	uint32_t id;
+	uint32_t pipeline_id;
+	uint32_t caps;
+	uint32_t core;
+	bool inter_core; /* true if connected to a comp from another core */
 
 	/* connected components */
 	struct comp_dev *source;	/* source component */
@@ -56,12 +87,21 @@ struct comp_buffer {
 	struct list_item source_list;	/* list in comp buffers */
 	struct list_item sink_list;	/* list in comp buffers */
 
-	/* callbacks */
-	void (*cb)(void *data, uint32_t bytes);
-	void *cb_data;
-	int cb_type;
+	/* runtime stream params */
+	uint32_t buffer_fmt;	/**< enum sof_ipc_buffer_format */
+	uint16_t chmap[SOF_IPC_MAX_CHANNELS];	/**< channel map - SOF_CHMAP_ */
 
-	spinlock_t lock; /* component buffer spinlock */
+	bool hw_params_configured; /**< indicates whether hw params were set */
+};
+
+struct buffer_cb_transact {
+	struct comp_buffer *buffer;
+	uint32_t transaction_amount;
+	void *transaction_begin_address;
+};
+
+struct buffer_cb_free {
+	struct comp_buffer *buffer;
 };
 
 #define buffer_comp_list(buffer, dir) \
@@ -92,28 +132,11 @@ struct comp_buffer {
 		buffer->cb_type = type;	\
 	} while (0)
 
-#define buffer_read_frag(buffer, idx, size) \
-	buffer_get_frag(buffer, buffer->r_ptr, idx, size)
-
-#define buffer_read_frag_s16(buffer, idx) \
-	buffer_get_frag(buffer, buffer->r_ptr, idx, sizeof(int16_t))
-
-#define buffer_read_frag_s32(buffer, idx) \
-	buffer_get_frag(buffer, buffer->r_ptr, idx, sizeof(int32_t))
-
-#define buffer_write_frag(buffer, idx, size) \
-	buffer_get_frag(buffer, buffer->w_ptr, idx, size)
-
-#define buffer_write_frag_s16(buffer, idx) \
-	buffer_get_frag(buffer, buffer->w_ptr, idx, sizeof(int16_t))
-
-#define buffer_write_frag_s32(buffer, idx) \
-	buffer_get_frag(buffer, buffer->w_ptr, idx, sizeof(int32_t))
-
-typedef void (*cache_buff_op)(struct comp_buffer *);
 
 /* pipeline buffer creation and destruction */
+struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t align);
 struct comp_buffer *buffer_new(struct sof_ipc_buffer *desc);
+int buffer_set_size(struct comp_buffer *buffer, uint32_t size);
 void buffer_free(struct comp_buffer *buffer);
 
 /* called by a component after producing data into this buffer */
@@ -122,105 +145,135 @@ void comp_update_buffer_produce(struct comp_buffer *buffer, uint32_t bytes);
 /* called by a component after consuming data from this buffer */
 void comp_update_buffer_consume(struct comp_buffer *buffer, uint32_t bytes);
 
-static inline void buffer_zero(struct comp_buffer *buffer)
+static inline void buffer_invalidate(struct comp_buffer *buffer, uint32_t bytes)
 {
-	tracev_buffer("buffer_zero()");
+	if (!buffer->inter_core)
+		return;
 
-	bzero(buffer->addr, buffer->size);
-	if (buffer->ipc_buffer.caps & SOF_MEM_CAPS_DMA)
-		dcache_writeback_region(buffer->addr, buffer->size);
+	audio_stream_invalidate(&buffer->stream, bytes);
 }
 
-/* get the max number of bytes that can be copied between sink and source */
-static inline int comp_buffer_can_copy_bytes(struct comp_buffer *source,
-					     struct comp_buffer *sink,
-					     uint32_t bytes)
+static inline void buffer_writeback(struct comp_buffer *buffer, uint32_t bytes)
 {
-	/* check for underrun */
-	if (source->avail < bytes)
-		return -1;
+	if (!buffer->inter_core)
+		return;
 
-	/* check for overrun */
-	if (sink->free < bytes)
-		return 1;
-
-	/* we are good to copy */
-	return 0;
+	audio_stream_writeback(&buffer->stream, bytes);
 }
 
-static inline uint32_t comp_buffer_get_copy_bytes(struct comp_buffer *source,
-						  struct comp_buffer *sink)
+/**
+ * Locks buffer instance for buffers connecting components
+ * running on different cores. Buffer parameters will be invalidated
+ * to make sure the latest data can be retrieved.
+ * @param buffer Buffer instance.
+ * @param flags IRQ flags.
+ */
+static inline void buffer_lock(struct comp_buffer *buffer, uint32_t *flags)
 {
-	if (source->avail > sink->free)
-		return sink->free;
-	else
-		return source->avail;
-}
+	if (!buffer->inter_core)
+		return;
 
-static inline void comp_buffer_cache_wtb_inv(struct comp_buffer *buffer)
-{
-	dcache_writeback_invalidate_region(buffer, sizeof(*buffer));
-}
+	spin_lock_irq(buffer->lock, *flags);
 
-static inline void comp_buffer_cache_inv(struct comp_buffer *buffer)
-{
+	/* invalidate in case something has changed during our wait */
 	dcache_invalidate_region(buffer, sizeof(*buffer));
 }
 
-static inline cache_buff_op comp_buffer_cache_op(int cmd)
+/**
+ * Unlocks buffer instance for buffers connecting components
+ * running on different cores. Buffer parameters will be flushed
+ * to make sure all the changes are saved. Also they will be invalidated
+ * to spare the need of locking/unlocking buffer, when only reading parameters.
+ * @param buffer Buffer instance.
+ * @param flags IRQ flags.
+ */
+static inline void buffer_unlock(struct comp_buffer *buffer, uint32_t flags)
 {
-	switch (cmd) {
-	case CACHE_WRITEBACK_INV:
-		return &comp_buffer_cache_wtb_inv;
-	case CACHE_INVALIDATE:
-		return &comp_buffer_cache_inv;
-	default:
-		trace_buffer_error("comp_buffer_cache_op() error: "
-				   "invalid cmd = %u", cmd);
-		return NULL;
-	}
+	if (!buffer->inter_core)
+		return;
+
+	/* save lock pointer to avoid memory access after cache flushing */
+	spinlock_t *lock = buffer->lock;
+
+	/* wtb and inv to avoid buffer locking in read only situations */
+	dcache_writeback_invalidate_region(buffer, sizeof(*buffer));
+
+	spin_unlock_irq(lock, flags);
 }
 
-static inline void buffer_reset_pos(struct comp_buffer *buffer)
+static inline void buffer_zero(struct comp_buffer *buffer)
 {
-	/* reset read and write pointer to buffer bas */
-	buffer->w_ptr = buffer->addr;
-	buffer->r_ptr = buffer->addr;
+	tracev_buffer_with_ids(buffer, "stream_zero()");
 
-	/* free space is buffer size */
-	buffer->free = buffer->size;
+	bzero(buffer->stream.addr, buffer->stream.size);
+	if (buffer->caps & SOF_MEM_CAPS_DMA)
+		dcache_writeback_region(buffer->stream.addr,
+					buffer->stream.size);
+}
 
-	/* there are no avail samples at reset */
-	buffer->avail = 0;
+static inline void buffer_reset_pos(struct comp_buffer *buffer, void *data)
+{
+	uint32_t flags = 0;
+
+	buffer_lock(buffer, &flags);
+
+	/* reset rw pointers and avail/free bytes counters */
+	audio_stream_reset(&buffer->stream);
 
 	/* clear buffer contents */
 	buffer_zero(buffer);
+
+	buffer_unlock(buffer, flags);
 }
 
-/* set the runtime size of a buffer in bytes and improve the data cache */
-/* performance by only using minimum space needed for runtime params */
-static inline int buffer_set_size(struct comp_buffer *buffer, uint32_t size)
+static inline void buffer_init(struct comp_buffer *buffer, uint32_t size,
+			       uint32_t caps)
 {
-	if (size > buffer->alloc_size)
-		return -ENOMEM;
-	if (size == 0)
-		return -EINVAL;
+	buffer->caps = caps;
 
-	buffer->end_addr = buffer->addr + size;
-	buffer->size = size;
+	/* addr should be set in alloc function */
+	audio_stream_init(&buffer->stream, buffer->stream.addr, size);
+}
+
+static inline void buffer_reset_params(struct comp_buffer *buffer, void *data)
+{
+	uint32_t flags = 0;
+
+	buffer_lock(buffer, &flags);
+
+	buffer->hw_params_configured = false;
+
+	buffer_unlock(buffer, flags);
+}
+
+static inline int buffer_set_params(struct comp_buffer *buffer,
+				    struct sof_ipc_stream_params *params,
+				    bool force_update)
+{
+	int ret;
+	int i;
+
+	if (!params) {
+		trace_buffer_error("buffer_set_params() error: !params");
+		return -EINVAL;
+	}
+
+	if (buffer->hw_params_configured && !force_update)
+		return 0;
+
+	ret = audio_stream_set_params(&buffer->stream, params);
+	if (ret < 0) {
+		trace_buffer_error("buffer_set_params() error: audio_stream_set_params failed");
+		return -EINVAL;
+	}
+
+	buffer->buffer_fmt = params->buffer_fmt;
+	for (i = 0; i < SOF_IPC_MAX_CHANNELS; i++)
+		buffer->chmap[i] = params->chmap[i];
+
+	buffer->hw_params_configured = true;
+
 	return 0;
 }
 
-static inline void *buffer_get_frag(struct comp_buffer *buffer, void *ptr,
-				    uint32_t idx, uint32_t size)
-{
-	void *current = ptr + (idx * size);
-
-	/* check for pointer wrap */
-	if (current >= buffer->end_addr)
-		current = buffer->addr + (current - buffer->end_addr);
-
-	return current;
-}
-
-#endif
+#endif /* __SOF_AUDIO_BUFFER_H__ */

@@ -7,8 +7,8 @@
  * Use spaces for formatting as cpp ignore tab sizes.
  */
 
-#include <platform/memory.h>
-#include <platform/platform.h>
+#include <config.h>
+#include <sof/lib/memory.h>
 #include <xtensa/config/core-isa.h>
 
 OUTPUT_ARCH(xtensa)
@@ -81,9 +81,6 @@ MEMORY
   sof_fw :
         org = SOF_FW_BASE,
         len = SOF_FW_MAX_SIZE
-  buffer_hp_heap :
-        org = HEAP_HP_BUFFER_BASE,
-        len = HEAP_HP_BUFFER_SIZE
   wnd0 :
         org = HP_SRAM_WIN0_BASE,
         len = HP_SRAM_WIN0_SIZE
@@ -96,6 +93,9 @@ MEMORY
   wnd3 :
         org = HP_SRAM_WIN3_BASE,
         len = HP_SRAM_WIN3_SIZE
+  static_uuid_entries_seg (!ari) :
+        org = UUID_ENTRY_ELF_BASE,
+        len = UUID_ENTRY_ELF_SIZE
   static_log_entries_seg (!ari) :
         org = LOG_ENTRY_ELF_BASE,
         len = LOG_ENTRY_ELF_SIZE
@@ -125,11 +125,11 @@ PHDRS
   vector_double_lit_phdr PT_LOAD;
   vector_double_text_phdr PT_LOAD;
   sof_fw_phdr PT_LOAD;
-  buffer_hp_heap_phdr PT_LOAD;
   wnd0_phdr PT_LOAD;
   wnd1_phdr PT_LOAD;
   wnd2_phdr PT_LOAD;
   wnd3_phdr PT_LOAD;
+  static_uuid_entries_phdr PT_NOTE;
   static_log_entries_phdr PT_NOTE;
 }
 
@@ -152,14 +152,6 @@ SECTIONS
     KEEP (*(.MemoryExceptionVector.text))
     _MemoryExceptionVector_text_end = ABSOLUTE(.);
   } >vector_memory_text :vector_memory_text_phdr
-
-  .buffer_hp_heap (NOLOAD) : ALIGN(8)
-  {
-    . = ALIGN (32);
-    _buffer_hp_heap_start = ABSOLUTE(.);
-    . = . + HEAP_HP_BUFFER_SIZE;
-    _buffer_hp_heap_end = ABSOLUTE(.);
-  } >buffer_hp_heap :buffer_hp_heap_phdr
 
   .wnd0 (NOLOAD) : ALIGN(8)
   {
@@ -334,6 +326,7 @@ SECTIONS
     *(.entry.text)
     *(.init.literal)
     KEEP(*(.init))
+    KEEP(*(.lps_vector))
     *(.literal .text .literal.* .text.* .stub .gnu.warning .gnu.linkonce.literal.* .gnu.linkonce.t.*.literal .gnu.linkonce.t.*)
     *(.fini.literal)
     KEEP(*(.fini))
@@ -388,6 +381,14 @@ SECTIONS
     _module_init_end = ABSOLUTE(.);
   } >sof_fw :sof_fw_phdr
 
+  .shared_data : ALIGN(PLATFORM_DCACHE_ALIGN)
+  {
+    _shared_data_start = ABSOLUTE(.);
+    *(*.shared_data)
+    _shared_data_end = ABSOLUTE(.);
+    . = ALIGN(PLATFORM_DCACHE_ALIGN);
+  } >sof_fw :sof_fw_phdr
+
   .data : ALIGN(4)
   {
     _data_start = ABSOLUTE(.);
@@ -418,6 +419,7 @@ SECTIONS
   .fw_ready : ALIGN(4)
   {
     KEEP (*(.fw_ready))
+    KEEP (*(.fw_ready_metadata))
   } >sof_fw :sof_fw_phdr
 
   .bss (NOLOAD) : ALIGN(4096)
@@ -443,7 +445,7 @@ SECTIONS
     . = . + HEAP_RUNTIME_SIZE;
     _runtime_heap_end = ABSOLUTE(.);
 
-    . = ALIGN (32);
+    . = ALIGN (HEAP_BUF_ALIGNMENT);
     _buffer_heap_start = ABSOLUTE(.);
     . = . + HEAP_BUFFER_SIZE;
     _buffer_heap_end = ABSOLUTE(.);
@@ -453,7 +455,7 @@ SECTIONS
     . = . + HEAP_SYSTEM_M_SIZE;
     _system_heap_end = ABSOLUTE(.);
 
-    . = ALIGN (32);
+    . = ALIGN (HEAP_BUF_ALIGNMENT);
     _system_runtime_heap_start = ABSOLUTE(.);
     . = . + HEAP_SYS_RUNTIME_M_SIZE;
     _system_runtime_heap_end = ABSOLUTE(.);
@@ -543,6 +545,11 @@ SECTIONS
     KEEP (*(.xt.profile_files))
     KEEP (*(.gnu.linkonce.xt.profile_files.*))
   }
+
+  .static_uuid_entries (COPY) : ALIGN(1024)
+  {
+    *(*.static_uuids)
+  } > static_uuid_entries_seg :static_uuid_entries_phdr
 
   .static_log_entries (COPY) : ALIGN(1024)
   {

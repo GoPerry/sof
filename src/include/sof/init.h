@@ -5,20 +5,18 @@
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
 
-#ifndef __INCLUDE_INIT_H__
-#define __INCLUDE_INIT_H__
+#ifndef __SOF_INIT_H__
+#define __SOF_INIT_H__
 
-#include <platform/platform.h>
+#include <arch/init.h>
 
 struct sof;
 
 /* main firmware entry point - argc and argv not currently used */
 int main(int argc, char *argv[]);
 
-int master_core_init(struct sof *sof);
+int master_core_init(int argc, char *argv[], struct sof *sof);
 
-int slave_core_init(struct sof *sof);
+int arch_init(void);
 
-int arch_init(struct sof *sof);
-
-#endif
+#endif /* __SOF_INIT_H__ */

@@ -6,17 +6,15 @@
 
 /* HiFi3 optimized code parts for SRC */
 
-#include <stdint.h>
-#include <sof/alloc.h>
-#include <sof/audio/format.h>
 #include <sof/audio/src/src_config.h>
-#include <sof/audio/src/src.h>
-#include <sof/math/numbers.h>
 
 #if SRC_HIFI3
 
+#include <sof/audio/src/src.h>
 #include <xtensa/config/defs.h>
 #include <xtensa/tie/xt_hifi3.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /* HiFi3 has
  * 16x 64 bit registers in register file AE_DR
@@ -301,6 +299,7 @@ static inline void fir_filter(ae_f32 *rp, const void *cp, ae_f32 *wp0,
 
 #endif /* 32bit coefficients version */
 
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
 void src_polyphase_stage_cir(struct src_stage_prm *s)
 {
 	/* This function uses
@@ -387,7 +386,7 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 		for (i = 0; i < cfg->num_of_subfilters; i++) {
 			fir_filter(rp, cp, wp, taps_div_4, cfg->shift, nch);
 			wp += nch_x_odm;
-			cp += subfilter_size;
+			cp = (char *)cp + subfilter_size;
 			src_inc_wrap((int32_t **)&wp, out_delay_end, out_size);
 
 			/* Circular advance pointer rp by number of
@@ -423,7 +422,9 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 
+#if CONFIG_FORMAT_S16LE
 void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 {
 	/* This function uses
@@ -512,7 +513,7 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 		for (i = 0; i < cfg->num_of_subfilters; i++) {
 			fir_filter(rp, cp, wp, taps_div_4, cfg->shift, nch);
 			wp += nch_x_odm;
-			cp += subfilter_size;
+			cp = (char *)cp + subfilter_size;
 			src_inc_wrap((int32_t **)&wp, out_delay_end, out_size);
 
 			/* Circular advance pointer rp by number of
@@ -553,5 +554,6 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S16LE */
 
 #endif

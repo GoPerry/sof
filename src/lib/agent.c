@@ -6,77 +6,85 @@
 
 /*
  * System Agent - Simple FW Monitor that can notify host drivers in the event
- * of any FW errors. The SA assumes that each core will enter the idle state
- * from time to time (within a period of PLATFORM_IDLE_TIME). If the core does
- * not enter the idle loop through looping forever or scheduling some work
- * continuously then the SA will emit trace and panic().
+ * of any FW errors. The SA checks if the DSP is still responsive and verifies
+ * the stability of the system by checking time elapsed between every timer
+ * tick. If the core exceeds the threshold by over 5% then the SA will emit
+ * error trace. However if it will be exceeded by over 100% the panic will be
+ * called.
  */
 
-#include <sof/sof.h>
-#include <sof/agent.h>
-#include <sof/debug.h>
-#include <sof/panic.h>
-#include <sof/alloc.h>
-#include <sof/clk.h>
-#include <sof/trace.h>
-#include <platform/timer.h>
-#include <platform/platform.h>
-#include <platform/clk.h>
 #include <sof/drivers/timer.h>
+#include <sof/lib/agent.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/clk.h>
+#include <sof/debug/panic.h>
+#include <sof/platform.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/schedule.h>
+#include <sof/schedule/task.h>
+#include <sof/sof.h>
+#include <sof/trace/trace.h>
+#include <ipc/topology.h>
+#include <ipc/trace.h>
+#include <user/trace.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define trace_sa(__e, ...) \
 	trace_event_atomic(TRACE_CLASS_SA, __e, ##__VA_ARGS__)
-#define trace_sa_value(__e, ...) \
-	trace_value_atomic(__e, ##__VA_ARGS__)
+#define trace_sa_error(__e, ...) \
+	trace_error(TRACE_CLASS_SA, __e, ##__VA_ARGS__)
 
-/*
- * Notify the SA that we are about to enter idle state (WFI).
- */
-void sa_enter_idle(struct sof *sof)
-{
-	struct sa *sa = sof->sa;
-
-	sa->last_idle = platform_timer_get(platform_timer);
-}
-
-static uint64_t validate(void *data)
+static enum task_state validate(void *data)
 {
 	struct sa *sa = data;
 	uint64_t current;
 	uint64_t delta;
 
-	current = platform_timer_get(platform_timer);
-	delta = current - sa->last_idle;
+	current = platform_timer_get(timer_get());
+	delta = current - sa->last_check;
 
-	/* were we last idle longer than timeout */
-	if (delta > sa->ticks) {
-		trace_sa("validate(), idle longer than timeout, delta = %u",
-			delta);
+	perf_cnt_stamp(TRACE_CLASS_SA, &sa->pcd, true);
+
+	/* panic timeout */
+	if (delta > sa->panic_timeout)
 		panic(SOF_IPC_PANIC_IDLE);
-	}
 
-	return PLATFORM_IDLE_TIME;
+	/* warning timeout */
+	if (delta > sa->warn_timeout)
+		trace_sa_error("validate(), ll drift detected, delta = "
+			       "%u", delta);
+
+	/* update last_check to current */
+	sa->last_check = current;
+
+	return SOF_TASK_STATE_RESCHEDULE;
 }
 
-void sa_init(struct sof *sof)
+void sa_init(struct sof *sof, uint64_t timeout)
 {
-	struct sa *sa;
+	uint64_t ticks;
 
-	trace_sa("sa_init()");
+	trace_sa("sa_init(), timeout = %u", timeout);
 
-	sa = rzalloc(RZONE_SYS, SOF_MEM_CAPS_RAM, sizeof(*sa));
-	sof->sa = sa;
+	sof->sa = rzalloc(SOF_MEM_ZONE_SYS, 0, SOF_MEM_CAPS_RAM,
+			  sizeof(*sof->sa));
 
-	/* set default tick timeout */
-	sa->ticks = clock_ms_to_ticks(PLATFORM_WORKQ_CLOCK, 1) *
-		PLATFORM_IDLE_TIME / 1000;
-	trace_sa("sa_init(), sa->ticks = %u", sa->ticks);
+	/* set default timeouts */
+	ticks = clock_ms_to_ticks(PLATFORM_DEFAULT_CLOCK, 1) * timeout / 1000;
 
-	/* set lst idle time to now to give time for boot completion */
-	sa->last_idle = platform_timer_get(platform_timer) + sa->ticks;
+	/* TODO: change values after minimal drifts will be assured */
+	sof->sa->panic_timeout = 2 * ticks;	/* 100% delay */
+	sof->sa->warn_timeout = ticks + ticks / 20;	/* 5% delay */
 
-	schedule_task_init(&sa->work, SOF_SCHEDULE_LL, SOF_TASK_PRI_HIGH,
-			   validate, sa, 0, 0);
+	trace_sa("sa_init(), ticks = %u, sof->sa->warn_timeout = %u, sof->sa->panic_timeout = %u",
+		 ticks, sof->sa->warn_timeout, sof->sa->panic_timeout);
 
-	schedule_task(&sa->work, PLATFORM_IDLE_TIME, 0, 0);
+	schedule_task_init_ll(&sof->sa->work, SOF_SCHEDULE_LL_TIMER,
+			      SOF_TASK_PRI_HIGH, validate, sof->sa, 0, 0);
+
+	schedule_task(&sof->sa->work, 0, timeout);
+
+	/* set last check time to now to give time for boot completion */
+	sof->sa->last_check = platform_timer_get(timer_get());
 }

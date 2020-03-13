@@ -4,14 +4,10 @@
 //
 // Author: Guennadi Liakhovetski <guennadi.liakhovetski@linux.intel.com>
 
+#include <sof/drivers/iomux.h>
+#include <sof/lib/io.h>
 #include <errno.h>
 #include <stddef.h>
-#include <stdint.h>
-
-#include <sof/io.h>
-#include <sof/iomux.h>
-
-#include <platform/memory.h>
 
 #define IOMUX_PIN_UNCONFIGURED 0
 

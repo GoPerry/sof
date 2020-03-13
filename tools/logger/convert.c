@@ -11,6 +11,9 @@
 #include <errno.h>
 #include <unistd.h>
 #include <math.h>
+#include <sof/lib/uuid.h>
+#include <user/abi_dbg.h>
+#include <user/trace.h>
 #include "convert.h"
 
 #define CEIL(a, b) ((a+b-1)/b)
@@ -20,11 +23,11 @@
 #define TRACE_MAX_FILENAME_LEN		128
 #define TRACE_MAX_IDS_STR		10
 #define TRACE_IDS_MASK			((1 << TRACE_ID_LENGTH) - 1)
+#define INVALID_TRACE_ID		(-1 & TRACE_IDS_MASK)
 
 struct ldc_entry_header {
 	uint32_t level;
 	uint32_t component_class;
-	uint32_t has_ids;
 	uint32_t params_num;
 	uint32_t line_idx;
 	uint32_t file_name_len;
@@ -38,6 +41,89 @@ struct ldc_entry {
 	uint32_t *params;
 };
 
+struct proc_ldc_entry {
+	int subst_mask;
+	struct ldc_entry_header header;
+	char *file_name;
+	char *text;
+	uintptr_t params[TRACE_MAX_PARAMS_COUNT];
+};
+
+static const char *BAD_PTR_STR = "<bad uid ptr %x>";
+
+const char *format_uid(const struct snd_sof_uids_header *uids_dict,
+		       uint32_t uid_ptr,
+		       int use_colors)
+{
+	char *str;
+
+	if (uid_ptr < uids_dict->base_address ||
+	    uid_ptr >= uids_dict->base_address + uids_dict->data_length) {
+		str = calloc(1, strlen(BAD_PTR_STR) + 1 + 6);
+		sprintf(str, BAD_PTR_STR, uid_ptr);
+	} else {
+		const struct sof_uuid *uid_val = (const struct sof_uuid *)
+			((uint8_t *)uids_dict + uids_dict->data_offset +
+			uid_ptr - uids_dict->base_address);
+
+		str = calloc(1, (use_colors ? strlen(KBLU) : 0) + 1 +
+			36 + 1 + *(uint32_t *)(uid_val + 1) + 1 +
+			(use_colors ? strlen(KNRM) : 0));
+		sprintf(str, "%s%s <%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x>%s",
+			use_colors ? KBLU : "",
+			(const char *)(uid_val + 1) + 4,
+			uid_val->a, uid_val->b, uid_val->c,
+			uid_val->d[0], uid_val->d[1], uid_val->d[2],
+			uid_val->d[3], uid_val->d[4], uid_val->d[5],
+			uid_val->d[6], uid_val->d[7],
+			use_colors ? KNRM : "");
+	}
+	return str;
+}
+
+static void process_params(struct proc_ldc_entry *pe,
+			   const struct ldc_entry *e,
+			   const struct snd_sof_uids_header *uids_dict,
+			   int use_colors)
+{
+	const char *p = e->text;
+	const char *t_end = p + strlen(e->text);
+	unsigned int par_bit = 1;
+	int i;
+
+	pe->subst_mask = 0;
+	pe->header =  e->header;
+	pe->file_name = e->file_name;
+	pe->text = e->text;
+
+	/* scan the text for possible replacements */
+	while ((p = strchr(p, '%'))) {
+		if (p < t_end - 1 && *(p + 1) == 's')
+			pe->subst_mask += par_bit;
+		par_bit <<= 1;
+		++p;
+	}
+
+	for (i = 0; i < e->header.params_num; i++) {
+		pe->params[i] = e->params[i];
+		if (pe->subst_mask & (1 << i))
+			pe->params[i] = (uintptr_t)format_uid(uids_dict,
+							      e->params[i],
+							      use_colors);
+	}
+}
+
+static void free_proc_ldc_entry(struct proc_ldc_entry *pe)
+{
+	int i;
+
+	for (i = 0; i < TRACE_MAX_PARAMS_COUNT; i++) {
+		if (pe->subst_mask & (1 << i))
+			free((void *)pe->params[i]);
+		pe->params[i] = 0;
+	}
+}
+
 static double to_usecs(uint64_t time, double clk)
 {
 	/* trace timestamp uses CPU system clock at default 25MHz ticks */
@@ -48,14 +134,8 @@ static double to_usecs(uint64_t time, double clk)
 
 static inline void print_table_header(FILE *out_fd)
 {
-	fprintf(out_fd, "%5s %6s %12s %7s %16s %16s %24s\t%s\n",
-		"CORE",
-		"LEVEL",
-		"COMP_ID",
-		"",
-		"TIMESTAMP",
-		"DELTA",
-		"FILE_NAME",
+	fprintf(out_fd, "%18s %18s  %2s %-18s %-29s  %s\n",
+		"TIMESTAMP", "DELTA", "C#", "COMPONENT", "LOCATION",
 		"CONTENT");
 	fflush(out_fd);
 }
@@ -63,36 +143,71 @@ static inline void print_table_header(FILE *out_fd)
 #define CASE(x) \
 	case(TRACE_CLASS_##x): return #x
 
-static const char * get_component_name(uint32_t component_id) {
-	switch (component_id) {
+static const char *get_level_color(uint32_t level)
+{
+	switch (level) {
+	case LOG_LEVEL_CRITICAL:
+		return KRED;
+	case LOG_LEVEL_WARNING:
+		return KYEL;
+	default:
+		return KNRM;
+	}
+}
+
+static const char *get_level_name(uint32_t level)
+{
+	switch (level) {
+	case LOG_LEVEL_CRITICAL:
+		return "ERROR ";
+	case LOG_LEVEL_WARNING:
+		return "WARN ";
+	default:
+		return ""; /* info is usual, do not print anything */
+	}
+}
+
+static
+const char *get_component_name(const struct snd_sof_uids_header *uids_dict,
+			       uint32_t trace_class, uint32_t uid_ptr)
+{
+	/* if uid_ptr is non-zero, find name in the ldc file */
+	if (uid_ptr) {
+		if (uid_ptr < uids_dict->base_address ||
+		    uid_ptr >= uids_dict->base_address +
+		    uids_dict->data_length)
+			return "<uid?>";
+		const struct sof_uuid *uid_val = (const struct sof_uuid *)
+			((uint8_t *)uids_dict + uids_dict->data_offset +
+			 uid_ptr - uids_dict->base_address);
+
+		return (const char *)(uid_val + 1) + sizeof(uint32_t);
+	}
+
+	/* otherwise print legacy trace class name */
+	switch (trace_class) {
 		CASE(IRQ);
 		CASE(IPC);
 		CASE(PIPE);
-		CASE(HOST);
 		CASE(DAI);
 		CASE(DMA);
-		CASE(SSP);
 		CASE(COMP);
 		CASE(WAIT);
 		CASE(LOCK);
 		CASE(MEM);
-		CASE(MIXER);
 		CASE(BUFFER);
-		CASE(VOLUME);
-		CASE(SWITCH);
-		CASE(MUX);
-		CASE(SRC);
-		CASE(TONE);
-		CASE(EQ_FIR);
-		CASE(EQ_IIR);
 		CASE(SA);
-		CASE(DMIC);
 		CASE(POWER);
+		CASE(IDC);
+		CASE(CPU);
+		CASE(CLK);
 		CASE(EDF);
-		CASE(KPB);
-		CASE(SELECTOR);
 		CASE(SCHEDULE);
 		CASE(SCHEDULE_LL);
+		CASE(CHMAP);
+		CASE(NOTIFIER);
+		CASE(MN);
+		CASE(PROBE);
 	default: return "unknown";
 	}
 }
@@ -108,63 +223,116 @@ static char *format_file_name(char *file_name_raw, int full_name)
 		if (!name)
 			name = file_name_raw;
 
-		/* keep the last 20 chars */
-		if (!full_name) {
-			len = strlen(name);
-			if (len > 20)
-				name += (len - 20);
+		if (full_name)
+			return name;
+		/* keep the last 24 chars */
+		len = strlen(name);
+		if (len > 24) {
+			char *sep_pos = NULL;
+
+			name += (len - 24);
+			sep_pos = strchr(name, '/');
+			if (!sep_pos)
+				return name;
+			while (--sep_pos >= name)
+				*sep_pos = '.';
 		}
 		return name;
 }
 
 static void print_entry_params(FILE *out_fd,
+	const struct snd_sof_uids_header *uids_dict,
 	const struct log_entry_header *dma_log, const struct ldc_entry *entry,
 	uint64_t last_timestamp, double clock, int use_colors, int raw_output)
-{	
+{
 	char ids[TRACE_MAX_IDS_STR];
 	float dt = to_usecs(dma_log->timestamp - last_timestamp, clock);
-	const char *entry_fmt = raw_output ?
-		"%s%u %u %s%s%s %.6f %.6f (%s:%u) " :
-		"%s%5u %6u %12s%s %-7s %16.6f %16.6f %20s:%-4u\t";
+	struct proc_ldc_entry proc_entry;
+
+	if (raw_output)
+		use_colors = 0;
 
 	if (dt < 0 || dt > 1000.0 * 1000.0 * 1000.0)
 		dt = NAN;
-	
-	if (entry->header.has_ids)
+
+	if (dma_log->id_0 != INVALID_TRACE_ID &&
+	    dma_log->id_1 != INVALID_TRACE_ID)
 		sprintf(ids, "%d.%d", (dma_log->id_0 & TRACE_IDS_MASK),
 			(dma_log->id_1 & TRACE_IDS_MASK));
-	fprintf(out_fd, entry_fmt,
-		entry->header.level == use_colors ?
-			(LOG_LEVEL_CRITICAL ? KRED : KNRM) : "",
-		dma_log->core_id,
-		entry->header.level,
-		get_component_name(entry->header.component_class),
-		raw_output && entry->header.has_ids ? "-" : "",
-		entry->header.has_ids ? ids : "",
-		to_usecs(dma_log->timestamp, clock),
-		dt,
-		format_file_name(entry->file_name, raw_output),
-		entry->header.line_idx);
+	else
+		ids[0] = '\0';
 
-	switch (entry->header.params_num) {
+	if (raw_output) {
+		const char *entry_fmt = "%s%u %u %s%s%s %.6f %.6f (%s:%u) ";
+
+		fprintf(out_fd, entry_fmt,
+			entry->header.level == use_colors ?
+				(LOG_LEVEL_CRITICAL ? KRED : KNRM) : "",
+			dma_log->core_id,
+			entry->header.level,
+			get_component_name(uids_dict,
+					   entry->header.component_class,
+					   dma_log->uid),
+			raw_output && strlen(ids) ? "-" : "",
+			ids,
+			to_usecs(dma_log->timestamp, clock),
+			dt,
+			format_file_name(entry->file_name, raw_output),
+			entry->header.line_idx);
+	} else {
+		/* timestamp */
+		fprintf(out_fd, "%s[%16.6f] (%16.6f)%s ",
+			use_colors ? KGRN : "",
+			to_usecs(dma_log->timestamp, clock), dt,
+			use_colors ? KNRM : "");
+
+		/* core id */
+		fprintf(out_fd, "c%d ", dma_log->core_id);
+
+		/* component name and id */
+		fprintf(out_fd, "%s%-12s %-5s%s ",
+			use_colors ? KYEL : "",
+			get_component_name(uids_dict,
+					   entry->header.component_class,
+					   dma_log->uid),
+			ids,
+			use_colors ? KNRM : "");
+
+		/* location */
+		fprintf(out_fd, "%24s:%-4u  ",
+			format_file_name(entry->file_name, raw_output),
+			entry->header.line_idx);
+
+		/* level name */
+		fprintf(out_fd, "%s%s",
+			use_colors ? get_level_color(entry->header.level) : "",
+			get_level_name(entry->header.level));
+	}
+
+	process_params(&proc_entry, entry, uids_dict, use_colors);
+
+	switch (proc_entry.header.params_num) {
 	case 0:
-		fprintf(out_fd, "%s", entry->text);
+		fprintf(out_fd, "%s", proc_entry.text);
 		break;
 	case 1:
-		fprintf(out_fd, entry->text, entry->params[0]);
+		fprintf(out_fd, proc_entry.text, proc_entry.params[0]);
 		break;
 	case 2:
-		fprintf(out_fd, entry->text, entry->params[0], entry->params[1]);
+		fprintf(out_fd, proc_entry.text, proc_entry.params[0],
+			proc_entry.params[1]);
 		break;
 	case 3:
-		fprintf(out_fd, entry->text, entry->params[0], entry->params[1],
-			entry->params[2]);
+		fprintf(out_fd, proc_entry.text, proc_entry.params[0],
+			proc_entry.params[1], proc_entry.params[2]);
 		break;
 	case 4:
-		fprintf(out_fd, entry->text, entry->params[0], entry->params[1],
-			entry->params[2], entry->params[3]);
+		fprintf(out_fd, proc_entry.text, proc_entry.params[0],
+			proc_entry.params[1], proc_entry.params[2],
+			proc_entry.params[3]);
 		break;
 	}
+	free_proc_ldc_entry(&proc_entry);
 	fprintf(out_fd, "%s\n", use_colors ? KNRM : "");
 	fflush(out_fd);
 }
@@ -276,8 +444,11 @@ static int fetch_entry(const struct convert_config *config,
 	}
 
 	/* printing entry content */
-	print_entry_params(config->out_fd, dma_log, &entry, *last_timestamp,
-			   config->clock, config->use_colors, config->raw_output);
+	print_entry_params(config->out_fd,
+			   config->uids_dict,
+			   dma_log, &entry, *last_timestamp,
+			   config->clock, config->use_colors,
+			   config->raw_output);
 	*last_timestamp = dma_log->timestamp;
 
 	/* set f_ldc file position to the beginning */
@@ -298,17 +469,19 @@ static int serial_read(const struct convert_config *config,
 {
 	struct log_entry_header dma_log;
 	size_t len;
-	uint32_t *n;
+	uint8_t *n;
 	int ret;
 
-	for (len = 0, n = (uint32_t *)&dma_log; len < sizeof(dma_log); n++) {
-		ret = read(config->serial_fd, n, sizeof(*n));
+	for (len = 0, n = (uint8_t *)&dma_log; len < sizeof(dma_log);
+		n += sizeof(uint32_t)) {
+
+		ret = read(config->serial_fd, n, sizeof(*n) * sizeof(uint32_t));
 		if (ret < 0)
 			return -errno;
 
 		/* In the beginning we read 1 spurious byte */
-		if (ret < sizeof(*n))
-			n--;
+		if (ret < sizeof(*n) * sizeof(uint32_t))
+			n -= sizeof(uint32_t);
 		else
 			len += ret;
 	}
@@ -397,8 +570,53 @@ static int logger_read(const struct convert_config *config,
 	return ret;
 }
 
-int convert(const struct convert_config *config) {
+/* fw verification */
+static int verify_fw_ver(const struct convert_config *config,
+			 const struct snd_sof_logs_header *snd)
+{
+	struct sof_ipc_fw_version ver;
+	int count, ret = 0;
+
+	if (!config->version_fd)
+		return 0;
+
+	/* here fw verification should be exploited */
+	count = fread(&ver, sizeof(ver), 1, config->version_fd);
+	if (!count) {
+		fprintf(stderr, "Error while reading %s.\n",
+			config->version_file);
+		return -ferror(config->version_fd);
+	}
+
+	ret = memcmp(&ver, &snd->version, sizeof(struct sof_ipc_fw_version));
+	if (ret) {
+		fprintf(stderr, "Error: fw version in %s file does not coincide with fw version in %s file.\n",
+			config->ldc_file, config->version_file);
+		return -EINVAL;
+	}
+
+	/* logger and version_file abi dbg verification */
+	if (SOF_ABI_VERSION_INCOMPATIBLE(SOF_ABI_DBG_VERSION,
+					 ver.abi_version)) {
+		fprintf(stderr, "Error: abi version in %s file does not coincide with abi version used by logger.\n",
+			config->version_file);
+		fprintf(stderr, "logger ABI Version is %d:%d:%d\n",
+			SOF_ABI_VERSION_MAJOR(SOF_ABI_DBG_VERSION),
+			SOF_ABI_VERSION_MINOR(SOF_ABI_DBG_VERSION),
+			SOF_ABI_VERSION_PATCH(SOF_ABI_DBG_VERSION));
+		fprintf(stderr, "version_file ABI Version is %d:%d:%d\n",
+			SOF_ABI_VERSION_MAJOR(ver.abi_version),
+			SOF_ABI_VERSION_MINOR(ver.abi_version),
+			SOF_ABI_VERSION_PATCH(ver.abi_version));
+		return -EINVAL;
+	}
+	return 0;
+}
+
+int convert(struct convert_config *config)
+{
 	struct snd_sof_logs_header snd;
+	struct snd_sof_uids_header uids_hdr;
 	int count, ret = 0;
 
 	count = fread(&snd, sizeof(snd), 1, config->ldc_fd);
@@ -412,56 +630,52 @@ int convert(const struct convert_config *config) {
 		return -EINVAL;
 	}
 
-	/* fw verification */
-	if (config->version_fd) {
-		struct sof_ipc_fw_version ver;
-
-		/* here fw verification should be exploited */
-		count = fread(&ver, sizeof(ver), 1, config->version_fd);
-		if (!count) {
-			fprintf(stderr, "Error while reading %s. \n", config->version_file);
-			return -ferror(config->version_fd);
-		}
-
-		ret = memcmp(&ver, &snd.version, sizeof(struct sof_ipc_fw_version));
-		if (ret) {
-			fprintf(stderr, "Error: fw version in %s file "
-				"does not coincide with fw version in "
-				"%s file. \n", config->ldc_file, config->version_file);
-			return -EINVAL;
-		}
-
-		/* logger and version_file abi verification */
-		if SOF_ABI_VERSION_INCOMPATIBLE(SOF_ABI_VERSION, ver.abi_version) {
-			fprintf(stderr, "Error: abi version in %s file "
-				"does not coincide with abi version used "
-				"by logger.\n", config->version_file);
-			fprintf(stderr, "logger ABI Version is %d:%d:%d\n",
-				SOF_ABI_VERSION_MAJOR(SOF_ABI_VERSION),
-				SOF_ABI_VERSION_MINOR(SOF_ABI_VERSION),
-				SOF_ABI_VERSION_PATCH(SOF_ABI_VERSION));
-			fprintf(stderr, "version_file ABI Version is %d:%d:%d\n",
-				SOF_ABI_VERSION_MAJOR(ver.abi_version),
-				SOF_ABI_VERSION_MINOR(ver.abi_version),
-				SOF_ABI_VERSION_PATCH(ver.abi_version));
-			return -EINVAL;
-		}
-	}
+	ret = verify_fw_ver(config, &snd);
+	if (ret)
+		return ret;
 
 	/* default logger and ldc_file abi verification */
-	if SOF_ABI_VERSION_INCOMPATIBLE(SOF_ABI_VERSION, snd.version.abi_version) {
+	if (SOF_ABI_VERSION_INCOMPATIBLE(SOF_ABI_DBG_VERSION,
+					 snd.version.abi_version)) {
 		fprintf(stderr, "Error: abi version in %s file "
 			"does not coincide with abi version used "
 			"by logger.\n", config->ldc_file);
 			fprintf(stderr, "logger ABI Version is %d:%d:%d\n",
-				SOF_ABI_VERSION_MAJOR(SOF_ABI_VERSION),
-				SOF_ABI_VERSION_MINOR(SOF_ABI_VERSION),
-				SOF_ABI_VERSION_PATCH(SOF_ABI_VERSION));
+				SOF_ABI_VERSION_MAJOR(SOF_ABI_DBG_VERSION),
+				SOF_ABI_VERSION_MINOR(SOF_ABI_DBG_VERSION),
+				SOF_ABI_VERSION_PATCH(SOF_ABI_DBG_VERSION));
 			fprintf(stderr, "ldc_file ABI Version is %d:%d:%d\n",
 				SOF_ABI_VERSION_MAJOR(snd.version.abi_version),
 				SOF_ABI_VERSION_MINOR(snd.version.abi_version),
 				SOF_ABI_VERSION_PATCH(snd.version.abi_version));
 		return -EINVAL;
 	}
+
+	/* read uuid section header */
+	fseek(config->ldc_fd, snd.data_offset + snd.data_length, SEEK_SET);
+	count = fread(&uids_hdr, sizeof(uids_hdr), 1, config->ldc_fd);
+	if (!count) {
+		fprintf(stderr, "Error while reading uuids header from %s.\n",
+			config->ldc_file);
+		return -ferror(config->ldc_fd);
+	}
+	if (strncmp((char *)uids_hdr.sig, SND_SOF_UIDS_SIG,
+		    SND_SOF_UIDS_SIG_SIZE)) {
+		fprintf(stderr, "Error: invalid uuid section signature.\n");
+		return -EINVAL;
+	}
+	config->uids_dict = calloc(1, sizeof(uids_hdr) + uids_hdr.data_length);
+	if (!config->uids_dict) {
+		fprintf(stderr, "Error: failed to alloc memory for uuids.\n");
+		return -ENOMEM;
+	}
+	memcpy(config->uids_dict, &uids_hdr, sizeof(uids_hdr));
+	count = fread(config->uids_dict + 1, uids_hdr.data_length, 1,
+		      config->ldc_fd);
+	if (!count) {
+		fprintf(stderr, "Error: failed to read uuid section data.\n");
+		return -ferror(config->ldc_fd);
+	}
+
 	return logger_read(config, &snd);
 }

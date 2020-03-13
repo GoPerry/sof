@@ -6,17 +6,15 @@
 
 /* HiFi EP optimized code parts for SRC */
 
-#include <stdint.h>
-#include <sof/alloc.h>
-#include <sof/audio/format.h>
 #include <sof/audio/src/src_config.h>
-#include <sof/audio/src/src.h>
-#include <sof/math/numbers.h>
 
 #if SRC_HIFIEP
 
+#include <sof/audio/src/src.h>
 #include <xtensa/config/defs.h>
 #include <xtensa/tie/xt_hifi2.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /* HiFi EP has
  * 4x 56 bit registers in register file Q
@@ -296,6 +294,7 @@ static inline void fir_filter(ae_q32s *rp, const void *cp, ae_q32s *wp0,
 }
 #endif /* 32bit coefficients version */
 
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
 void src_polyphase_stage_cir(struct src_stage_prm *s)
 {
 	/* This function uses
@@ -316,7 +315,7 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 	struct src_stage *cfg = s->stage;
 	int32_t *fir_end = &fir->fir_delay[fir->fir_delay_size];
 	int32_t *out_delay_end = &fir->out_delay[fir->out_delay_size];
-	const void *cp; /* Can be int32_t or int16_t */
+	const char *cp; /* Can be int32_t or int16_t */
 	const size_t out_size = fir->out_delay_size * sizeof(int32_t);
 	const int nch = s->nch;
 	const int nch_x_odm = cfg->odm * nch;
@@ -419,7 +418,9 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 
+#if CONFIG_FORMAT_S16LE
 void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 {
 	/* This function uses
@@ -440,7 +441,7 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 	struct src_stage *cfg = s->stage;
 	int32_t *fir_end = &fir->fir_delay[fir->fir_delay_size];
 	int32_t *out_delay_end = &fir->out_delay[fir->out_delay_size];
-	const void *cp; /* Can be int32_t or int16_t */
+	const char *cp; /* Can be int32_t or int16_t */
 	const size_t out_size = fir->out_delay_size * sizeof(int32_t);
 	const int nch = s->nch;
 	const int nch_x_odm = cfg->odm * nch;
@@ -549,5 +550,6 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S16LE */
 
 #endif

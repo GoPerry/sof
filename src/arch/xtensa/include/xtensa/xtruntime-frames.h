@@ -87,14 +87,12 @@ STRUCT_FIELD (long,4,UEXC_,pc)
 STRUCT_FIELD (long,4,UEXC_,ps)
 STRUCT_FIELD (long,4,UEXC_,sar)
 STRUCT_FIELD (long,4,UEXC_,vpri)
-#ifdef __XTENSA_CALL0_ABI__
 STRUCT_FIELD (long,4,UEXC_,a0)
-#endif
+STRUCT_FIELD (long,4,UEXC_,a1)
 STRUCT_FIELD (long,4,UEXC_,a2)
 STRUCT_FIELD (long,4,UEXC_,a3)
 STRUCT_FIELD (long,4,UEXC_,a4)
 STRUCT_FIELD (long,4,UEXC_,a5)
-#ifdef __XTENSA_CALL0_ABI__
 STRUCT_FIELD (long,4,UEXC_,a6)
 STRUCT_FIELD (long,4,UEXC_,a7)
 STRUCT_FIELD (long,4,UEXC_,a8)
@@ -104,13 +102,14 @@ STRUCT_FIELD (long,4,UEXC_,a11)
 STRUCT_FIELD (long,4,UEXC_,a12)
 STRUCT_FIELD (long,4,UEXC_,a13)
 STRUCT_FIELD (long,4,UEXC_,a14)
-#endif
 STRUCT_FIELD (long,4,UEXC_,a15)
 STRUCT_FIELD (long,4,UEXC_,exccause)	/* NOTE: can probably rid of this one (pass direct) */
+STRUCT_FIELD (long,4,UEXC_,align1)	/* alignment to 8 bytes */
 #if XCHAL_HAVE_LOOPS
 STRUCT_FIELD (long,4,UEXC_,lcount)
 STRUCT_FIELD (long,4,UEXC_,lbeg)
 STRUCT_FIELD (long,4,UEXC_,lend)
+STRUCT_FIELD (long,4,UEXC_,align2)	/* alignment to 8 bytes */
 #endif
 #if XCHAL_HAVE_MAC16
 STRUCT_FIELD (long,4,UEXC_,acclo)
@@ -118,24 +117,13 @@ STRUCT_FIELD (long,4,UEXC_,acchi)
 STRUCT_AFIELD(long,4,UEXC_,mr, 4)
 #endif
 #if (XCHAL_CP_MASK & CP0_MASK)
-#define HAVE_CP0	1
-STRUCT_AFIELD_A(long,4,XCHAL_CP0_SA_ALIGN,UEXC_,cp0, XCHAL_CP0_SA_SIZE / 4)
-#else
-#define HAVE_CP0	0
+STRUCT_AFIELD (long,4,UEXC_,cp0, XCHAL_CP0_SA_SIZE / 4)
 #endif
 #if (XCHAL_CP_MASK & CP1_MASK)
-#define HAVE_CP1	1
-STRUCT_AFIELD_A(long,4,XCHAL_CP1_SA_ALIGN,UEXC_,cp1, XCHAL_CP1_SA_SIZE / 4)
-#else
-#define HAVE_CP1	0
+STRUCT_AFIELD (long,4,UEXC_,cp1, XCHAL_CP1_SA_SIZE / 4)
 #endif
 /* ALIGNPAD is the 16-byte alignment padding. */
-#ifdef __XTENSA_CALL0_ABI__
-# define CALL0_ABI	1
-#else
-# define CALL0_ABI	0
-#endif
-#define ALIGNPAD  ((2 + XCHAL_HAVE_LOOPS*1 + XCHAL_HAVE_MAC16*2 + HAVE_CP0*2 + HAVE_CP1*1 + CALL0_ABI*2) & 3)
+#define ALIGNPAD  ((2 + XCHAL_HAVE_MAC16*2 + ((XCHAL_CP0_SA_SIZE%16)/4) + ((XCHAL_CP1_SA_SIZE%16)/4)) & 3)
 #if ALIGNPAD
 STRUCT_AFIELD(long,4,UEXC_,pad, ALIGNPAD)	/* 16-byte alignment padding */
 #endif
@@ -147,16 +135,36 @@ STRUCT_END(UserFrame)
  * each processor individually.
  *
  * To access the core specific structure from ASM (after threadptr is set):
- * xtos_addr_percore a13, _xtos_interrupt_table
- *
- * Access to the core specific structure from C is not supported!
+ * xtos_addr_percore a13, xtos_interrupt_table
  */
 STRUCT_BEGIN
 STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_enabled)
 STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_intstruct)
 STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_interrupt_table)
 STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_interrupt_mask_table)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_stack_for_interrupt_1)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_stack_for_interrupt_2)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_stack_for_interrupt_3)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_stack_for_interrupt_4)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_stack_for_interrupt_5)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_interrupt_ctx)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_saved_ctx)
+STRUCT_FIELD(void*,4,XTOS_PTR_TO_,xtos_saved_sp)
 STRUCT_END(xtos_structures_pointers)
+
+/*
+ * xtos_task_context contains information about currently
+ * executed task
+ */
+
+#define XTOS_TASK_CONTEXT_OWN_STACK	1
+
+STRUCT_BEGIN
+STRUCT_FIELD (UserFrame*,4,TC_,stack_pointer)
+STRUCT_FIELD (void*,4,TC_,stack_base)
+STRUCT_FIELD (long,4,TC_,stack_size)
+STRUCT_FIELD (long,4,TC_,flags)
+STRUCT_END(xtos_task_context)
 
 #if defined(_ASMLANGUAGE) || defined(__ASSEMBLER__)
 

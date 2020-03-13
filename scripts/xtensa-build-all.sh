@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright(c) 2018 Intel Corporation. All rights reserved.
 
-SUPPORTED_PLATFORMS=(byt cht bdw hsw apl cnl sue icl skl kbl imx8)
+SUPPORTED_PLATFORMS=(byt cht bdw hsw apl skl kbl cnl sue icl jsl \
+                    imx8 imx8x imx8m)
 BUILD_ROM=no
 BUILD_DEBUG=no
 BUILD_FORCE_UP=no
@@ -106,6 +107,7 @@ WORKDIR="$pwd"
 for j in ${PLATFORMS[@]}
 do
 	HAVE_ROM='no'
+	DEFCONFIG_PATCH=''
 	if [ $j == "byt" ]
 	then
 		PLATFORM="baytrail"
@@ -128,15 +130,19 @@ do
 	then
 		PLATFORM="broadwell"
 		ARCH="xtensa"
+		XTENSA_CORE="LX4_langwell_audio_17_8"
 		ROOT="$pwd/../xtensa-root/xtensa-hsw-elf"
 		HOST="xtensa-hsw-elf"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 	fi
 	if [ $j == "hsw" ]
 	then
 		PLATFORM="haswell"
 		ARCH="xtensa"
+		XTENSA_CORE="LX4_langwell_audio_17_8"
 		ROOT="$pwd/../xtensa-root/xtensa-hsw-elf"
 		HOST="xtensa-hsw-elf"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 	fi
 	if [ $j == "apl" ]
 	then
@@ -199,39 +205,70 @@ do
 	then
 		PLATFORM="cannonlake"
 		ARCH="xtensa-smp"
-		XTENSA_CORE="X6H3CNL_2016_4_linux"
+		XTENSA_CORE="X6H3CNL_2017_8"
 		ROOT="$pwd/../xtensa-root/xtensa-cnl-elf"
 		HOST="xtensa-cnl-elf"
-		XTENSA_TOOLS_VERSION="RF-2016.4-linux"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 		HAVE_ROM='yes'
 	fi
 	if [ $j == "sue" ]
         then
-                PLATFORM="suecreek"
+		PLATFORM="suecreek"
 		ARCH="xtensa"
-                XTENSA_CORE="X6H3CNL_2016_4_linux"
-                ROOT="$pwd/../xtensa-root/xtensa-cnl-elf"
-                HOST="xtensa-cnl-elf"
-                XTENSA_TOOLS_VERSION="RF-2016.4-linux"
+		XTENSA_CORE="X6H3CNL_2017_8"
+		ROOT="$pwd/../xtensa-root/xtensa-cnl-elf"
+		HOST="xtensa-cnl-elf"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 		HAVE_ROM='yes'
         fi
 	if [ $j == "icl" ]
 	then
 		PLATFORM="icelake"
 		ARCH="xtensa-smp"
-		XTENSA_CORE="X6H3CNL_2016_4_linux"
+		XTENSA_CORE="X6H3CNL_2017_8"
 		ROOT="$pwd/../xtensa-root/xtensa-cnl-elf"
 		HOST="xtensa-cnl-elf"
-		XTENSA_TOOLS_VERSION="RF-2016.4-linux"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
+		HAVE_ROM='yes'
+	fi
+	if [ $j == "jsl" ]
+	then
+		PLATFORM="jasperlake"
+		ARCH="xtensa-smp"
+		XTENSA_CORE="X6H3CNL_2017_8"
+		ROOT="$pwd/../xtensa-root/xtensa-cnl-elf"
+		HOST="xtensa-cnl-elf"
+		XTENSA_TOOLS_VERSION="RG-2017.8-linux"
 		HAVE_ROM='yes'
 	fi
 	if [ $j == "imx8" ]
 	then
 		PLATFORM="imx8"
 		ARCH="xtensa"
+		XTENSA_CORE="hifi4_nxp_v3_3_1_2_dev"
 		ROOT="$pwd/../xtensa-root/xtensa-imx-elf"
 		HOST="xtensa-imx-elf"
+		XTENSA_TOOLS_VERSION="RF-2016.4-linux"
 	fi
+	if [ $j == "imx8x" ]
+	then
+		PLATFORM="imx8x"
+		ARCH="xtensa"
+		XTENSA_CORE="hifi4_nxp_v3_3_1_2_dev"
+		ROOT="$pwd/../xtensa-root/xtensa-imx-elf"
+		HOST="xtensa-imx-elf"
+		XTENSA_TOOLS_VERSION="RF-2016.4-linux"
+	fi
+	if [ $j == "imx8m" ]
+	then
+		PLATFORM="imx8m"
+		ARCH="xtensa"
+		XTENSA_CORE="hifi4_mscale_v0_0_2_prod"
+		ROOT="$pwd/../xtensa-root/xtensa-imx8m-elf"
+		HOST="xtensa-imx8m-elf"
+		XTENSA_TOOLS_VERSION="RF-2016.4-linux"
+	fi
+
 	if [ $XTENSA_TOOLS_ROOT ]
 	then
 		XTENSA_TOOLS_DIR="$XTENSA_TOOLS_ROOT/install/tools/$XTENSA_TOOLS_VERSION"
@@ -263,6 +300,11 @@ do
 		TOOLCHAIN=$HOST
 		PATH=$pwd/../$HOST/bin:$OLDPATH
 		COMPILER="gcc"
+
+		case $j in
+			byt|cht|cnl|sue) DEFCONFIG_PATCH="_gcc";;
+			*)	     DEFCONFIG_PATCH="";;
+		esac
 	fi
 
 	BUILD_DIR=build_${j}_${COMPILER}
@@ -279,7 +321,7 @@ do
 		${PRIVATE_KEY_OPTION} \
 		..
 
-	make ${PLATFORM}_defconfig
+	make ${PLATFORM}${DEFCONFIG_PATCH}_defconfig
 
 	if [[ "x$MAKE_MENUCONFIG" == "xyes" ]]
 	then

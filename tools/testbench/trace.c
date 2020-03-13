@@ -24,26 +24,25 @@ char *get_trace_class(uint32_t trace_class)
 		CASE(IRQ);
 		CASE(IPC);
 		CASE(PIPE);
-		CASE(HOST);
 		CASE(DAI);
 		CASE(DMA);
-		CASE(SSP);
 		CASE(COMP);
 		CASE(WAIT);
 		CASE(LOCK);
 		CASE(MEM);
-		CASE(MIXER);
 		CASE(BUFFER);
-		CASE(VOLUME);
-		CASE(SWITCH);
-		CASE(MUX);
-		CASE(SRC);
-		CASE(TONE);
-		CASE(EQ_FIR);
-		CASE(EQ_IIR);
 		CASE(SA);
-		CASE(DMIC);
 		CASE(POWER);
+		CASE(IDC);
+		CASE(CPU);
+		CASE(CLK);
+		CASE(EDF);
+		CASE(SCHEDULE);
+		CASE(SCHEDULE_LL);
+		CASE(CHMAP);
+		CASE(NOTIFIER);
+		CASE(MN);
+		CASE(PROBE);
 	default: return "unknown";
 	}
 }

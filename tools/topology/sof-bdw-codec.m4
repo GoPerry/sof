@@ -1,6 +1,5 @@
 #
-ifelse(CODEC, `RT286', `# Topology for generic Broadwell board with RT286.', `')
-ifelse(CODEC, `RT5640', `# Topology for generic Broadwell board with RT5640.', `')
+`# Topology for generic bdw board with' CODEC
 #
 
 # Include topology builder
@@ -18,8 +17,8 @@ include(`sof/tokens.m4')
 # Include Broadwell DSP configuration
 include(`platform/intel/bdw.m4')
 
-define(PIPE_NAME, ifelse(CODEC, `RT5640', pipe-bdw-rt5640,
-	ifelse(CODEC, `RT286', pipe-bdw-rt286, `')))
+
+define(PIPE_NAME, pipe-bdw-`'CODEC`')
 
 #
 # Define the pipelines
@@ -32,22 +31,40 @@ define(PIPE_NAME, ifelse(CODEC, `RT5640', pipe-bdw-rt5640,
 #
 
 # Low Latency playback pipeline 1 on PCM 0 using max 2 channels of s32le.
-# Schedule 48 frames per 1000us deadline on core 0 with priority 0
+# 1000us deadline on core 0 with priority 1
 PIPELINE_PCM_ADD(sof/pipe-low-latency-playback.m4,
 	1, 0, 2, s32le,
-	48, 1000, 0, 0)
+	1000, 0, 0,
+	48000, 48000, 48000)
 
 # Low Latency capture pipeline 2 on PCM 0 using max 2 channels of s32le.
-# Schedule 48 frames per 1000us deadline on core 0 with priority 0
+# 1000us deadline on core 0 with priority 0
 PIPELINE_PCM_ADD(sof/pipe-low-latency-capture.m4,
 	2, 0, 2, s32le,
-	48, 1000, 0, 0)
+	1000, 0, 0,
+	48000, 48000, 48000)
+
+#
+# DAI configuration
+#
+# SSP port 0 is our only pipeline DAI
+#
+
+# playback DAI is SSP0 using 2 periods
+# Buffers use s24le format, 1000us deadline on core 0 with priority 0
+DAI_ADD(sof/pipe-dai-playback.m4,
+	1, SSP, 0, Codec,
+	PIPELINE_SOURCE_1, 2, s24le,
+	1000, 1, 0, SCHEDULE_TIME_DOMAIN_DMA)
 
 # PCM Media Playback pipeline 3 on PCM 1 using max 2 channels of s32le.
-# Schedule 96 frames per 2000us deadline on core 0 with priority 1
+# 2000us deadline on core 0 with priority 0
 PIPELINE_PCM_ADD(sof/pipe-pcm-media.m4,
 	3, 1, 2, s32le,
-	96, 2000, 1, 0)
+	2000, 0, 0,
+	8000, 96000, 48000,
+	SCHEDULE_TIME_DOMAIN_DMA,
+	PIPELINE_PLAYBACK_SCHED_COMP_1)
 
 # Connect pipelines together
 SectionGraph."PIPE_NAME" {
@@ -59,25 +76,12 @@ SectionGraph."PIPE_NAME" {
 	]
 }
 
-#
-# DAI configuration
-#
-# SSP port 0 is our only pipeline DAI
-#
-
-# playback DAI is SSP0 using 2 periods
-# Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
-DAI_ADD(sof/pipe-dai-playback.m4,
-	1, SSP, 0, Codec,
-	PIPELINE_SOURCE_1, 2, s24le,
-	48, 1000, 0, 0)
-
 # capture DAI is SSP0 using 2 periods
-# Buffers use s24le format, with 48 frame per 1000us on core 0 with priority 0
+# Buffers use s24le format, 1000us deadline on core 0 with priority 0
 DAI_ADD(sof/pipe-dai-capture.m4,
 	2, SSP, 0, Codec,
 	PIPELINE_SINK_2, 2, s24le,
-	48, 1000, 0, 0)
+	1000, 0, 0, SCHEDULE_TIME_DOMAIN_DMA)
 
 # PCM Low Latency
 PCM_DUPLEX_ADD(Low Latency, 0, PIPELINE_PCM_1, PIPELINE_PCM_2)
@@ -91,3 +95,9 @@ DAI_CONFIG(SSP, 0, 0, Codec,
 		      SSP_CLOCK(fsync, 48000, codec_slave),
 		      SSP_TDM(2, 25, 3, 3),
 		      SSP_CONFIG_DATA(SSP, 0, 24)))
+
+dnl CODEC is defined and will be expanded, need to undefine it before use
+undefine(`CODEC')
+VIRTUAL_WIDGET(SSP0 CODEC OUT, output, 0)
+VIRTUAL_WIDGET(SSP0 CODEC IN, input, 1)
+VIRTUAL_WIDGET(DSP Capture, input, 2)

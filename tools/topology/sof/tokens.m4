@@ -41,6 +41,13 @@ SectionVendorTokens."sof_src_tokens" {
 	SOF_TKN_SRC_RATE_OUT			"301"
 }
 
+SectionVendorTokens."sof_asrc_tokens" {
+	SOF_TKN_ASRC_RATE_IN			"320"
+	SOF_TKN_ASRC_RATE_OUT			"321"
+	SOF_TKN_ASRC_ASYNCHRONOUS_MODE		"322"
+	SOF_TKN_ASRC_OPERATION_MODE		"323"
+}
+
 SectionVendorTokens."sof_pcm_tokens" {
 	SOF_TKN_PCM_DMAC_CONFIG			"353"
 }
@@ -60,6 +67,7 @@ SectionVendorTokens."sof_ssp_tokens" {
 	SOF_TKN_INTEL_SSP_FRAME_PULSE_WIDTH 	"503"
 	SOF_TKN_INTEL_SSP_QUIRKS		"504"
 	SOF_TKN_INTEL_SSP_TDM_PADDING_PER_SLOT  "505"
+	SOF_TKN_INTEL_SSP_BCLK_DELAY		"506"
 }
 
 SectionVendorTokens."sof_dmic_tokens" {
@@ -71,6 +79,7 @@ SectionVendorTokens."sof_dmic_tokens" {
 	SOF_TKN_INTEL_DMIC_NUM_PDM_ACTIVE	"605"
 	SOF_TKN_INTEL_DMIC_SAMPLE_RATE		"608"
 	SOF_TKN_INTEL_DMIC_FIFO_WORD_LENGTH	"609"
+	SOF_TKN_INTEL_DMIC_UNMUTE_RAMP_TIME_MS	"610"
 }
 
 SectionVendorTokens."sof_dmic_pdm_tokens" {
@@ -89,4 +98,22 @@ SectionVendorTokens."sof_tone_tokens" {
 
 SectionVendorTokens."sof_process_tokens" {
 	SOF_TKN_PROCESS_TYPE			"900"
+}
+
+SectionVendorTokens."sof_sai_tokens" {
+	SOF_TKN_IMX_SAI_MCLK_ID			"1000"
+}
+
+SectionVendorTokens."sof_esai_tokens" {
+	SOF_TKN_IMX_ESAI_MCLK_ID		"1100"
+}
+
+SectionVendorTokens."sof_stream_tokens" {
+	SOF_TKN_STREAM_PLAYBACK_COMPATIBLE_D0I3		"1200"
+	SOF_TKN_STREAM_CAPTURE_COMPATIBLE_D0I3		"1201"
+}
+
+SectionVendorTokens."sof_led_tokens" {
+	SOF_TKN_MUTE_LED_USE			"1300"
+	SOF_TKN_MUTE_LED_DIRECTION		"1301"
 }

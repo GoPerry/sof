@@ -5,8 +5,10 @@
  * Author: Slawomir Blauciak <slawomir.blauciak@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_USER_DETECT_TEST_H__
-#define __INCLUDE_UAPI_USER_DETECT_TEST_H__
+#ifndef __USER_DETECT_TEST_H__
+#define __USER_DETECT_TEST_H__
+
+#include <stdint.h>
 
 /** IPC blob types */
 #define SOF_DETECT_TEST_CONFIG	0
@@ -24,17 +26,20 @@ struct sof_detect_test_config {
 	/** activation right shift, determines the speed of activation */
 	uint16_t activation_shift;
 
+	/** sample width in bits */
+	int16_t sample_width;
+
 	/** activation threshold */
-	int16_t activation_threshold;
+	int32_t activation_threshold;
 
 	/** default draining size in bytes */
 	uint32_t history_depth;
 
 	/** reserved for future use */
-	uint32_t reserved[2];
+	uint32_t reserved[1];
 } __attribute__((packed));
 
 /** used for binary blob size sanity checks */
 #define SOF_DETECT_TEST_MAX_CFG_SIZE sizeof(struct sof_detect_test_config)
 
-#endif
+#endif /* __USER_DETECT_TEST_H__ */

@@ -10,21 +10,23 @@
  * \author Tomasz Lauda <tomasz.lauda@linux.intel.com>
  */
 
-#include <sof/pm_runtime.h>
-#include <sof/alloc.h>
-#include <platform/pm_runtime.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/pm_runtime.h>
+#include <sof/sof.h>
+#include <sof/spinlock.h>
+#include <ipc/topology.h>
+#include <stdint.h>
 
-/** \brief Runtime power management data pointer. */
-static struct pm_runtime_data *prd;
-
-void pm_runtime_init(void)
+void pm_runtime_init(struct sof *sof)
 {
-	trace_pm("pm_runtime_init()");
+	sof->prd = rzalloc(SOF_MEM_ZONE_SYS, SOF_MEM_FLAG_SHARED,
+			   SOF_MEM_CAPS_RAM, sizeof(*sof->prd));
+	spinlock_init(&sof->prd->lock);
 
-	prd = rzalloc(RZONE_SYS, SOF_MEM_CAPS_RAM, sizeof(*prd));
-	spinlock_init(&prd->lock);
+	platform_pm_runtime_init(sof->prd);
 
-	platform_pm_runtime_init(prd);
+	platform_shared_commit(sof->prd, sizeof(*sof->prd));
 }
 
 void pm_runtime_get(enum pm_runtime_context context, uint32_t index)
@@ -68,5 +70,37 @@ void pm_runtime_put_sync(enum pm_runtime_context context, uint32_t index)
 	default:
 		platform_pm_runtime_put(context, index, 0);
 		break;
+	}
+}
+
+void pm_runtime_enable(enum pm_runtime_context context, uint32_t index)
+{
+	tracev_pm("pm_runtime_enable()");
+
+	switch (context) {
+	default:
+		platform_pm_runtime_enable(context, index);
+		break;
+	}
+}
+
+void pm_runtime_disable(enum pm_runtime_context context, uint32_t index)
+{
+	tracev_pm("pm_runtime_disable()");
+
+	switch (context) {
+	default:
+		platform_pm_runtime_disable(context, index);
+		break;
+	}
+}
+
+bool pm_runtime_is_active(enum pm_runtime_context context, uint32_t index)
+{
+	tracev_pm("pm_runtime_is_active()");
+
+	switch (context) {
+	default:
+		return platform_pm_runtime_is_active(context, index);
 	}
 }

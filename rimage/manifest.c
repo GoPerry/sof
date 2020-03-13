@@ -42,6 +42,7 @@ static int man_open_rom_file(struct image *image)
 	if (!image->out_rom_fd) {
 		fprintf(stderr, "error: unable to open %s for writing %d\n",
 			image->out_rom_file, errno);
+		return -errno;
 	}
 
 	return 0;
@@ -57,6 +58,7 @@ static int man_open_unsigned_file(struct image *image)
 	if (!image->out_unsigned_fd) {
 		fprintf(stderr, "error: unable to open %s for writing %d\n",
 			image->out_unsigned_file, errno);
+		return -errno;
 	}
 
 	return 0;
@@ -72,6 +74,7 @@ static int man_open_manifest_file(struct image *image)
 	if (!image->out_man_fd) {
 		fprintf(stderr, "error: unable to open %s for writing %d\n",
 			image->out_man_file, errno);
+		return -errno;
 	}
 
 	return 0;
@@ -240,7 +243,7 @@ static int man_get_module_manifest(struct image *image, struct module *module,
 	/* module built using xcc has preceding bytes */
 	if (section->size > sizeof(sof_mod))
 		ret = fseek(module->fd,
-			    section->off + XCC_MOD_OFFSET, SEEK_SET);
+			    section->off + image->xcc_mod_offset, SEEK_SET);
 	else
 		ret = fseek(module->fd, section->off, SEEK_SET);
 
@@ -572,13 +575,13 @@ static int man_module_create_reloc(struct image *image, struct module *module,
 }
 
 static int man_write_unsigned_mod(struct image *image, int meta_start_offset,
-				  int meta_end_offset)
+				  int meta_end_offset, size_t ext_file_size)
 {
 	int count;
 
 	/* write metadata file for unsigned FW */
 	count = fwrite(image->fw_image + meta_start_offset,
-		       sizeof(struct sof_man_adsp_meta_file_ext), 1,
+		       ext_file_size, 1,
 		       image->out_man_fd);
 
 	/* did the metadata/manifest write succeed ? */
@@ -687,11 +690,11 @@ static int man_hash_modules(struct image *image, struct sof_man_fw_desc *desc)
 			continue;
 		}
 
-		ri_hash(image,
-			man_module->segment[SOF_MAN_SEGMENT_TEXT].file_offset,
-			(man_module->segment[SOF_MAN_SEGMENT_TEXT].flags.r.length +
-			man_module->segment[SOF_MAN_SEGMENT_RODATA].flags.r.length) *
-			MAN_PAGE_SIZE, man_module->hash);
+		ri_sha256(image,
+			 man_module->segment[SOF_MAN_SEGMENT_TEXT].file_offset,
+			 (man_module->segment[SOF_MAN_SEGMENT_TEXT].flags.r.length +
+			 man_module->segment[SOF_MAN_SEGMENT_RODATA].flags.r.length) *
+			 MAN_PAGE_SIZE, man_module->hash);
 	}
 
 	return 0;
@@ -756,7 +759,8 @@ static int man_write_fw_v1_5(struct image *image)
 
 	/* write the unsigned files*/
 	ret = man_write_unsigned_mod(image, MAN_META_EXT_OFFSET_V1_5,
-				     MAN_FW_DESC_OFFSET_V1_5);
+				     MAN_FW_DESC_OFFSET_V1_5,
+				     sizeof(struct sof_man_adsp_meta_file_ext_v1_8));
 	if (ret < 0)
 		goto err;
 
@@ -861,8 +865,8 @@ static int man_write_fw_v1_8(struct image *image)
 	fprintf(stdout, "Firmware completing manifest v1.8\n");
 
 	/* create structures from end of file to start of file */
-	ri_adsp_meta_data_create(image, MAN_META_EXT_OFFSET_V1_8,
-				 MAN_FW_DESC_OFFSET_V1_8);
+	ri_adsp_meta_data_create_v1_8(image, MAN_META_EXT_OFFSET_V1_8,
+				      MAN_FW_DESC_OFFSET_V1_8);
 	ri_plat_ext_data_create(image);
 	ri_css_v1_8_hdr_create(image);
 	ri_cse_create(image);
@@ -875,12 +879,13 @@ static int man_write_fw_v1_8(struct image *image)
 	man_hash_modules(image, desc);
 
 	/* calculate hash for ADSP meta data extension - 0x480 to end */
-	ri_hash(image, MAN_FW_DESC_OFFSET_V1_8, image->image_end
-		- MAN_FW_DESC_OFFSET_V1_8, m->adsp_file_ext.comp_desc[0].hash);
+	ri_sha256(image, MAN_FW_DESC_OFFSET_V1_8, image->image_end
+		  - MAN_FW_DESC_OFFSET_V1_8,
+		  m->adsp_file_ext.comp_desc[0].hash);
 
 	/* calculate hash for platform auth data - repeated in hash 2 and 4 */
-	ri_hash(image, MAN_META_EXT_OFFSET_V1_8,
-		sizeof(struct sof_man_adsp_meta_file_ext), hash);
+	ri_sha256(image, MAN_META_EXT_OFFSET_V1_8,
+		  sizeof(struct sof_man_adsp_meta_file_ext_v1_8), hash);
 
 	/* hash values in reverse order */
 	for (i = 0; i < SOF_MAN_MOD_SHA256_LEN; i++) {
@@ -901,7 +906,8 @@ static int man_write_fw_v1_8(struct image *image)
 
 	/* write the unsigned files*/
 	ret = man_write_unsigned_mod(image, MAN_META_EXT_OFFSET_V1_8,
-				     MAN_FW_DESC_OFFSET_V1_8);
+				     MAN_FW_DESC_OFFSET_V1_8,
+				     sizeof(struct sof_man_adsp_meta_file_ext_v1_8));
 	if (ret < 0)
 		goto err;
 
@@ -920,8 +926,8 @@ err:
 static int man_write_fw_meu_v1_5(struct image *image)
 {
 	const int meta_start_offset = image->meu_offset -
-		sizeof(struct sof_man_adsp_meta_file_ext) - MAN_EXT_PADDING;
-	struct sof_man_adsp_meta_file_ext *meta;
+		sizeof(struct sof_man_adsp_meta_file_ext_v1_8) - MAN_EXT_PADDING;
+	struct sof_man_adsp_meta_file_ext_v1_8 *meta;
 	struct sof_man_fw_desc *desc;
 	uint32_t preload_size;
 	int ret;
@@ -958,7 +964,8 @@ static int man_write_fw_meu_v1_5(struct image *image)
 	fprintf(stdout, "Firmware completing manifest v1.5\n");
 
 	/* create structures from end of file to start of file */
-	ri_adsp_meta_data_create(image, meta_start_offset, image->meu_offset);
+	ri_adsp_meta_data_create_v1_8(image, meta_start_offset,
+				      image->meu_offset);
 
 	/* write preload page count */
 	preload_size = meta->comp_desc[0].limit_offset - MAN_DESC_OFFSET_V1_5;
@@ -969,12 +976,13 @@ static int man_write_fw_meu_v1_5(struct image *image)
 	man_hash_modules(image, desc);
 
 	/* calculate hash for ADSP meta data extension */
-	ri_hash(image, image->meu_offset, image->image_end -
+	ri_sha256(image, image->meu_offset, image->image_end -
 		image->meu_offset, meta->comp_desc[0].hash);
 
 	/* write the unsigned files */
 	ret = man_write_unsigned_mod(image, meta_start_offset,
-				     image->meu_offset);
+				     image->meu_offset,
+				     sizeof(struct sof_man_adsp_meta_file_ext_v1_8));
 	if (ret < 0)
 		goto err;
 
@@ -991,8 +999,8 @@ err:
 static int man_write_fw_meu_v1_8(struct image *image)
 {
 	const int meta_start_offset = image->meu_offset -
-		sizeof(struct sof_man_adsp_meta_file_ext) - MAN_EXT_PADDING;
-	struct sof_man_adsp_meta_file_ext *meta;
+		sizeof(struct sof_man_adsp_meta_file_ext_v1_8) - MAN_EXT_PADDING;
+	struct sof_man_adsp_meta_file_ext_v1_8 *meta;
 	struct sof_man_fw_desc *desc;
 	uint32_t preload_size;
 	int ret;
@@ -1020,7 +1028,7 @@ static int man_write_fw_meu_v1_8(struct image *image)
 
 	/* copy data */
 	memcpy(meta, &image->adsp->man_v1_8->adsp_file_ext,
-	       sizeof(struct sof_man_adsp_meta_file_ext));
+	       sizeof(struct sof_man_adsp_meta_file_ext_v1_8));
 	memcpy(desc, &image->adsp->man_v1_8->desc,
 	       sizeof(struct sof_man_fw_desc));
 
@@ -1031,7 +1039,8 @@ static int man_write_fw_meu_v1_8(struct image *image)
 	fprintf(stdout, "Firmware completing manifest v1.8\n");
 
 	/* create structures from end of file to start of file */
-	ri_adsp_meta_data_create(image, meta_start_offset, image->meu_offset);
+	ri_adsp_meta_data_create_v1_8(image, meta_start_offset,
+				      image->meu_offset);
 
 	/* write preload page count */
 	preload_size = meta->comp_desc[0].limit_offset - MAN_DESC_OFFSET_V1_8;
@@ -1042,12 +1051,88 @@ static int man_write_fw_meu_v1_8(struct image *image)
 	man_hash_modules(image, desc);
 
 	/* calculate hash for ADSP meta data extension */
-	ri_hash(image, image->meu_offset, image->image_end -
+	ri_sha256(image, image->meu_offset, image->image_end -
 		image->meu_offset, meta->comp_desc[0].hash);
 
 	/* write the unsigned files */
 	ret = man_write_unsigned_mod(image, meta_start_offset,
-				     image->meu_offset);
+				     image->meu_offset,
+				     sizeof(struct sof_man_adsp_meta_file_ext_v1_8));
+	if (ret < 0)
+		goto err;
+
+	fprintf(stdout, "Firmware manifest completed!\n");
+	return 0;
+
+err:
+	free(image->fw_image);
+	unlink(image->out_file);
+	return ret;
+}
+
+/* used to sign with MEU */
+static int man_write_fw_meu_v2_5(struct image *image)
+{
+	const int meta_start_offset = image->meu_offset -
+		sizeof(struct sof_man_adsp_meta_file_ext_v2_5) - MAN_EXT_PADDING;
+	struct sof_man_adsp_meta_file_ext_v2_5 *meta;
+	struct sof_man_fw_desc *desc;
+	uint32_t preload_size;
+	int ret;
+
+	/* allocate image */
+	image->fw_image = calloc(image->adsp->image_size, 1);
+	if (!image->fw_image) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	/* open unsigned firmware */
+	ret = man_open_unsigned_file(image);
+	if (ret < 0)
+		goto err;
+
+	/* create the manifest */
+	ret = man_open_manifest_file(image);
+	if (ret < 0)
+		goto err;
+
+	/* create the module */
+	meta = image->fw_image + meta_start_offset;
+	desc = image->fw_image + MAN_DESC_OFFSET_V1_8;
+
+	/* copy data */
+	memcpy(meta, &image->adsp->man_v2_5->adsp_file_ext,
+	       sizeof(struct sof_man_adsp_meta_file_ext_v2_5));
+	memcpy(desc, &image->adsp->man_v2_5->desc,
+	       sizeof(struct sof_man_fw_desc));
+
+	/* create each module */
+	desc->header.num_module_entries = image->num_modules;
+	man_create_modules(image, desc, FILE_TEXT_OFFSET_V1_8);
+
+	fprintf(stdout, "Firmware completing manifest v2.5\n");
+
+	/* create structures from end of file to start of file */
+	ri_adsp_meta_data_create_v2_5(image, meta_start_offset,
+				      image->meu_offset);
+
+	/* write preload page count */
+	preload_size = meta->comp_desc[0].limit_offset - MAN_DESC_OFFSET_V1_8;
+	preload_size += MAN_PAGE_SIZE - (preload_size % MAN_PAGE_SIZE);
+	desc->header.preload_page_count = preload_size / MAN_PAGE_SIZE;
+
+	/* calculate hash for each module */
+	man_hash_modules(image, desc);
+
+	/* calculate hash for ADSP meta data extension */
+	ri_sha384(image, image->meu_offset, image->image_end -
+		  image->meu_offset, meta->comp_desc[0].hash);
+
+	/* write the unsigned files */
+	ret = man_write_unsigned_mod(image, meta_start_offset,
+				     image->meu_offset,
+				     sizeof(struct sof_man_adsp_meta_file_ext_v2_5));
 	if (ret < 0)
 		goto err;
 
@@ -1086,6 +1171,11 @@ err:
 #define ADSP_ICL_DSP_ROM_SIZE	0x00002000
 #define ICL_DSP_IMR_BASE_ENTRY	0xb0038000
 #define ICL_DSP_HP_BASE_ENTRY	0xbe040000
+
+#define ADSP_TGL_DSP_ROM_BASE	0x9F180000
+#define ADSP_TGL_DSP_ROM_SIZE	0x00002000
+#define TGL_DSP_IMR_BASE_ENTRY	0xb0038000
+#define TGL_DSP_HP_BASE_ENTRY	0xbe040000
 
 /* list of supported adsp */
 const struct adsp machine_apl = {
@@ -1194,6 +1284,54 @@ const struct adsp machine_icl = {
 	.write_firmware = man_write_fw_v1_8,
 	.write_firmware_meu = man_write_fw_meu_v1_8,
 	.man_v1_8 = &cnl_manifest, // use the same as CNL
+};
+
+const struct adsp machine_jsl = {
+	.name = "jsl",
+	.mem_zones = {
+		[SOF_FW_BLK_TYPE_ROM] = {
+			.base = ADSP_ICL_DSP_ROM_BASE,
+			.size = ADSP_ICL_DSP_ROM_SIZE,
+		},
+		[SOF_FW_BLK_TYPE_IMR] = {
+			.base = ICL_DSP_IMR_BASE_ENTRY,
+			.size = 0x100000,
+		},
+		[SOF_FW_BLK_TYPE_SRAM] = {
+			.base = ICL_DSP_HP_BASE_ENTRY,
+			.size = 0x100000,
+		},
+	},
+	.image_size = 0x100000,
+	.dram_offset = 0,
+	.machine_id = MACHINE_ICELAKE,
+	.write_firmware = man_write_fw_v1_8,
+	.write_firmware_meu = man_write_fw_meu_v1_8,
+	.man_v1_8 = &cnl_manifest, // use the same as CNL
+};
+
+const struct adsp machine_tgl = {
+	.name = "tgl",
+	.mem_zones = {
+		[SOF_FW_BLK_TYPE_ROM] = {
+			.base = ADSP_TGL_DSP_ROM_BASE,
+			.size = ADSP_TGL_DSP_ROM_SIZE,
+		},
+		[SOF_FW_BLK_TYPE_IMR] = {
+			.base = TGL_DSP_IMR_BASE_ENTRY,
+			.size = 0x100000,
+		},
+		[SOF_FW_BLK_TYPE_SRAM] = {
+			.base = TGL_DSP_HP_BASE_ENTRY,
+			.size = 0x100000,
+		},
+	},
+	.image_size = 0x100000,
+	.dram_offset = 0,
+	.machine_id = MACHINE_TIGERLAKE,
+	.write_firmware = NULL, /* not yet implemented */
+	.write_firmware_meu = man_write_fw_meu_v2_5,
+	.man_v2_5 = &tgl_manifest,
 };
 
 const struct adsp machine_sue = {

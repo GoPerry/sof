@@ -31,7 +31,7 @@ sof-logger works by reading entry parameters value and entries addresses from
 FW dma_trace mechanism and searching suitable entry in *.ldc file by its
 address.
 
-```bash
+```
 Usage sof-logger <option(s)> <file(s)>
 			Display mailbox contents
 -h			help
@@ -41,6 +41,8 @@ Usage sof-logger <option(s)> <file(s)>
 -o out_file		Specify the output file, instead of default stdout
 -t			Get traces from "/sys/kernel/debug/sof/trace", instead
 			of the default "/sys/kernel/debug/sof/etrace"
+-u baud			Input data from a UART
+-r			Less formatted output for chained log processors
 -p			Get traces from stdin, instead of the default
 			"/sys/kernel/debug/sof/etrace"
 -c			Set timestamp clock in MHz
@@ -48,7 +50,8 @@ Usage sof-logger <option(s)> <file(s)>
 			"/sys/kernel/debug/sof/fw_version"
 -v ver_file		Enable checking firmware version with ver_file file,
 			instead of default: "/sys/kernel/debug/sof/fw_version"
--s			Take a snapshot of state
+-s state_name		Take a snapshot of state. Save the debugfs entries in
+			state_name.*.txt.
 ```
 
 **Examples:**
@@ -111,7 +114,7 @@ to the core dump including DSP registers and function calls.
 It outputs unwrapped gdb command function call addresses to human readable
 function call format either to a file or stdout.
 
-```bash
+```
 Usage sof-coredump-reader.py [-h] [-a ARCH] [-c] [-l COLUMNCOUNT] [-v]
 				(--stdout | -o OUTFILE) [--stdin | -i INFILE]
 

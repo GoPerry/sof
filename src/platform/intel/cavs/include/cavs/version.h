@@ -5,20 +5,25 @@
  * Author: Bartosz Kokoszko <bartoszx.kokoszko@linux.intel.com>
  */
 
-#ifndef __INCLUDE_CAVS_VERSION_H__
-#define __INCLUDE_CAVS_VERSION_H__
+#ifndef __CAVS_VERSION_H__
+#define __CAVS_VERSION_H__
+
+#include <config.h>
 
 #define CAVS_VERSION_1_5 0x10500
 #define CAVS_VERSION_1_8 0x10800
 #define CAVS_VERSION_2_0 0x20000
+#define CAVS_VERSION_2_5 0x20500
 
 /* CAVS version defined by CONFIG_CAVS_VER_*/
-#if defined(CONFIG_CAVS_VERSION_1_5)
+#if CONFIG_CAVS_VERSION_1_5
 #define CAVS_VERSION CAVS_VERSION_1_5
-#elif defined(CONFIG_CAVS_VERSION_1_8)
+#elif CONFIG_CAVS_VERSION_1_8
 #define CAVS_VERSION CAVS_VERSION_1_8
-#elif defined(CONFIG_CAVS_VERSION_2_0)
+#elif CONFIG_CAVS_VERSION_2_0
 #define CAVS_VERSION CAVS_VERSION_2_0
+#elif CONFIG_CAVS_VERSION_2_5
+#define CAVS_VERSION CAVS_VERSION_2_5
 #endif
 
-#endif
+#endif /* __CAVS_VERSION_H__ */

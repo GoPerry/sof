@@ -5,8 +5,8 @@
  * Author: Seppo Ingalsuo <seppo.ingalsuo@linux.intel.com>
  */
 
-#ifndef FIR_HIFI2EP_H
-#define FIR_HIFI2EP_H
+#ifndef __SOF_AUDIO_EQ_FIR_FIR_HIFI2EP_H__
+#define __SOF_AUDIO_EQ_FIR_FIR_HIFI2EP_H__
 
 #include <sof/audio/eq_fir/fir_config.h>
 
@@ -14,7 +14,10 @@
 
 #include <xtensa/config/defs.h>
 #include <xtensa/tie/xt_hifi2.h>
-#include <sof/audio/format.h>
+#include <stdint.h>
+
+struct comp_buffer;
+struct sof_eq_fir_coef_data;
 
 struct fir_state_32x16 {
 	ae_p24x2f *rwp; /* Circular read and write pointer */
@@ -29,33 +32,38 @@ struct fir_state_32x16 {
 
 void fir_reset(struct fir_state_32x16 *fir);
 
-size_t fir_init_coef(struct fir_state_32x16 *fir,
-		     struct sof_eq_fir_coef_data *config);
+int fir_delay_size(struct sof_eq_fir_coef_data *config);
+
+int fir_init_coef(struct fir_state_32x16 *fir,
+		  struct sof_eq_fir_coef_data *config);
 
 void fir_init_delay(struct fir_state_32x16 *fir, int32_t **data);
 
-void eq_fir_s16_hifiep(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		       struct comp_buffer *sink, int frames, int nch);
-
-void eq_fir_s24_hifiep(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		       struct comp_buffer *sink, int frames, int nch);
-
-void eq_fir_s32_hifiep(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		       struct comp_buffer *sink, int frames, int nch);
+void eq_fir_s16_hifiep(struct fir_state_32x16 fir[],
+		       const struct audio_stream *source,
+		       struct audio_stream *sink, int frames, int nch);
 
 void eq_fir_2x_s16_hifiep(struct fir_state_32x16 fir[],
-			  struct comp_buffer *source,
-			  struct comp_buffer *sink,
+			  const struct audio_stream *source,
+			  struct audio_stream *sink,
 			  int frames, int nch);
+
+void eq_fir_s24_hifiep(struct fir_state_32x16 fir[],
+		       const struct audio_stream *source,
+		       struct audio_stream *sink, int frames, int nch);
 
 void eq_fir_2x_s24_hifiep(struct fir_state_32x16 fir[],
-			  struct comp_buffer *source,
-			  struct comp_buffer *sink,
+			  const struct audio_stream *source,
+			  struct audio_stream *sink,
 			  int frames, int nch);
 
+void eq_fir_s32_hifiep(struct fir_state_32x16 fir[],
+		       const struct audio_stream *source,
+		       struct audio_stream *sink, int frames, int nch);
+
 void eq_fir_2x_s32_hifiep(struct fir_state_32x16 fir[],
-			  struct comp_buffer *source,
-			  struct comp_buffer *sink,
+			  const struct audio_stream *source,
+			  struct audio_stream *sink,
 			  int frames, int nch);
 
 /* Setup circular buffer for FIR input data delay */
@@ -239,4 +247,4 @@ static inline void fir_32x16_2x_hifiep(struct fir_state_32x16 *fir, int32_t x0,
 }
 
 #endif
-#endif
+#endif /* __SOF_AUDIO_EQ_FIR_FIR_HIFI2EP_H__ */

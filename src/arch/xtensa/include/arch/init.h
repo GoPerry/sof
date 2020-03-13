@@ -11,12 +11,20 @@
  * \authors Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
 
+#ifdef __SOF_INIT_H__
+
 #ifndef __ARCH_INIT_H__
 #define __ARCH_INIT_H__
 
-#include <xtensa/hal.h>
+#include <sof/debug/panic.h>
+#include <ipc/trace.h>
+#include <config.h>
+#include <xtensa/corebits.h>
 #include <xtensa/xtruntime.h>
-#include <sof/panic.h>
+#include <stddef.h>
+#include <stdint.h>
+
+struct sof;
 
 /**
  * \brief Called in the case of exception.
@@ -121,4 +129,20 @@ static inline void register_exceptions(void)
  */
 static inline void __memmap_init(void) { }
 
-#endif
+#if CONFIG_SMP
+
+int slave_core_init(struct sof *sof);
+
+#else
+
+static inline int slave_core_init(struct sof *sof) { return 0; }
+
+#endif /* CONFIG_SMP */
+
+#endif /* __ARCH_INIT_H__ */
+
+#else
+
+#error "This file shouldn't be included from outside of sof/init.h"
+
+#endif /* __SOF_INIT_H__ */

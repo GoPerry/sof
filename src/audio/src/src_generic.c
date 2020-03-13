@@ -8,14 +8,14 @@
  * architecture.
  */
 
-#include <stdint.h>
-#include <sof/alloc.h>
-#include <sof/audio/format.h>
 #include <sof/audio/src/src_config.h>
-#include <sof/audio/src/src.h>
-#include <sof/math/numbers.h>
 
 #if SRC_GENERIC
+
+#include <sof/audio/format.h>
+#include <sof/audio/src/src.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #if SRC_SHORT /* 16 bit coefficients version */
 
@@ -222,6 +222,7 @@ static inline void fir_filter_generic(int32_t *rp, const void *cp, int32_t *wp0,
 
 #endif /* 32bit coefficients version */
 
+#if CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE
 void src_polyphase_stage_cir(struct src_stage_prm *s)
 {
 	int i;
@@ -292,7 +293,7 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 					   fir_delay, fir_end, fir_length,
 					   taps_x_nch, cfg->shift, nch);
 			wp += nch_x_odm;
-			cp += subfilter_size;
+			cp = (char *)cp + subfilter_size;
 			src_inc_wrap(&wp, out_delay_end, out_size);
 			rp -= nch_x_idm; /* Next sub-filter start */
 			src_dec_wrap(&rp, fir_delay, fir_size);
@@ -320,7 +321,9 @@ void src_polyphase_stage_cir(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S24LE || CONFIG_FORMAT_S32LE */
 
+#if CONFIG_FORMAT_S16LE
 void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 {
 	int i;
@@ -391,7 +394,7 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 					   fir_delay, fir_end, fir_length,
 					   taps_x_nch, cfg->shift, nch);
 			wp += nch_x_odm;
-			cp += subfilter_size;
+			cp = (char *)cp + subfilter_size;
 			src_inc_wrap(&wp, out_delay_end, out_size);
 			rp -= nch_x_idm; /* Next sub-filter start */
 			src_dec_wrap(&rp, fir_delay, fir_size);
@@ -419,5 +422,6 @@ void src_polyphase_stage_cir_s16(struct src_stage_prm *s)
 	s->x_rptr = x_rptr;
 	s->y_wptr = y_wptr;
 }
+#endif /* CONFIG_FORMAT_S16LE */
 
 #endif

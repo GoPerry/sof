@@ -5,15 +5,16 @@
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
+#include <sof/drivers/ipc.h>
+#include <sof/lib/dma.h>
+#include <sof/platform.h>
+#include <sof/trace/dma-trace.h>
+#include <sof/trace/trace.h>
+#include <user/trace.h>
+#include <config.h>
+#include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <ipc/trace.h>
-#include <sof/sof.h>
-#include <sof/debug.h>
-#include <sof/trace.h>
-#include <sof/ipc.h>
-#include <sof/dma.h>
-#include <sof/wait.h>
-#include <platform/dma.h>
 
 /* tracing */
 #define trace_dma(__e)	trace_event(TRACE_CLASS_DMA, __e)
@@ -49,22 +50,6 @@ static struct dma_sg_elem *sg_get_elem_at(struct dma_sg_config *host_sg,
 }
 #endif
 
-#if !CONFIG_DMA_GW
-
-static void dma_complete(void *data, uint32_t type, struct dma_cb_data *next)
-{
-	completion_t *comp = (completion_t *)data;
-
-	if (type == DMA_CB_TYPE_IRQ)
-		wait_completed(comp);
-
-	ipc_dma_trace_send_position();
-
-	next->status = DMA_CB_STATUS_END;
-}
-
-#endif
-
 /* Copy DSP memory to host memory.
  * Copies DSP memory to host in a single PAGE_SIZE or smaller block. Does not
  * waits/sleeps and can be used in IRQ context.
@@ -77,7 +62,7 @@ int dma_copy_to_host_nowait(struct dma_copy *dc, struct dma_sg_config *host_sg,
 	int ret;
 
 	/* tell gateway to copy */
-	ret = dma_copy(dc->dmac, dc->chan, size, 0);
+	ret = dma_copy(dc->chan, size, 0);
 	if (ret < 0)
 		return ret;
 
@@ -90,6 +75,7 @@ int dma_copy_to_host_nowait(struct dma_copy *dc, struct dma_sg_config *host_sg,
 int dma_copy_to_host_nowait(struct dma_copy *dc, struct dma_sg_config *host_sg,
 			    int32_t host_offset, void *local_ptr, int32_t size)
 {
+	struct dma_trace_data *dmat = dma_trace_data_get();
 	struct dma_sg_config config;
 	struct dma_sg_elem *host_sg_elem;
 	struct dma_sg_elem local_sg_elem;
@@ -124,13 +110,18 @@ int dma_copy_to_host_nowait(struct dma_copy *dc, struct dma_sg_config *host_sg,
 	config.elem_array.count = 1;
 
 	/* start the DMA */
-	err = dma_set_config(dc->dmac, dc->chan, &config);
+	err = dma_set_config(dc->chan, &config);
 	if (err < 0)
 		return err;
 
-	err = dma_start(dc->dmac, dc->chan);
+	err = dma_copy(dc->chan, local_sg_elem.size,
+		       DMA_COPY_ONE_SHOT | DMA_COPY_BLOCKING);
 	if (err < 0)
 		return err;
+
+	ipc_msg_send(dmat->msg, &dmat->posn, false);
+
+	platform_shared_commit(dmat, sizeof(*dmat));
 
 	/* bytes copied */
 	return local_sg_elem.size;
@@ -155,14 +146,10 @@ int dma_copy_new(struct dma_copy *dc)
 #if !CONFIG_DMA_GW
 	/* get DMA channel from DMAC0 */
 	dc->chan = dma_channel_get(dc->dmac, 0);
-	if (dc->chan < 0) {
-		trace_dma_error("dma_copy_new() error: dc->chan < 0");
-		return dc->chan;
+	if (!dc->chan) {
+		trace_dma_error("dma_copy_new() error: dc->chan is NULL");
+		return -ENODEV;
 	}
-
-	dc->complete.timeout = 100;	/* wait 100 usecs for DMA to finish */
-	dma_set_cb(dc->dmac, dc->chan, DMA_CB_TYPE_IRQ, dma_complete,
-		   &dc->complete);
 #endif
 
 	return 0;
@@ -174,9 +161,9 @@ int dma_copy_set_stream_tag(struct dma_copy *dc, uint32_t stream_tag)
 {
 	/* get DMA channel from DMAC */
 	dc->chan = dma_channel_get(dc->dmac, stream_tag - 1);
-	if (dc->chan < 0) {
+	if (!dc->chan) {
 		trace_dma_error("dma_copy_set_stream_tag() error: "
-				"dc->chan < 0");
+				"dc->chan is NULL");
 		return -EINVAL;
 	}
 

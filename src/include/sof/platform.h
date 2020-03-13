@@ -11,22 +11,21 @@
   * \author Marcin Maka <marcin.maka@linux.intel.com>
   */
 
-#ifndef __INCLUDE_SOF_PLATFORM_H__
-#define __INCLUDE_SOF_PLATFORM_H__
+#ifndef __SOF_PLATFORM_H__
+#define __SOF_PLATFORM_H__
 
-#include <sof/sof.h>
+#include <platform/platform.h>
+
+#if !defined(__ASSEMBLER__) && !defined(LINKER)
+
+#include <stdint.h>
+
+struct sof;
 
 /** \addtogroup platform_api Platform API
  *  Platform API specification.
  *  @{
  */
-
-/* data cache line alignment */
-#if DCACHE_LINE_SIZE > 0
-#define PLATFORM_DCACHE_ALIGN	DCACHE_LINE_SIZE
-#else
-#define PLATFORM_DCACHE_ALIGN	sizeof(uint32_t)
-#endif
 
 /*
  * APIs declared here are defined for every platform.
@@ -49,3 +48,5 @@ int platform_init(struct sof *sof);
 /** @}*/
 
 #endif
+
+#endif /* __SOF_PLATFORM_H__ */

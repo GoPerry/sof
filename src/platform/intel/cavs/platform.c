@@ -7,40 +7,49 @@
 //         Rander Wang <rander.wang@intel.com>
 //         Janusz Jankowski <janusz.jankowski@linux.intel.com>
 
-#include <platform/memory.h>
-#include <platform/mailbox.h>
-#include <platform/shim.h>
-#include <platform/dma.h>
-#include <platform/dai.h>
-#include <platform/clk.h>
-#if defined(CONFIG_ICELAKE) || defined(CONFIG_SUECREEK)
-#include <platform/clk-map.h>
-#endif
-#include <platform/timer.h>
-#include <platform/interrupt.h>
-#include <platform/idc.h>
-#include <ipc/info.h>
-#include <sof/mailbox.h>
-#include <sof/dai.h>
-#include <sof/dma.h>
-#include <sof/sof.h>
-#include <sof/agent.h>
-#include <sof/clk.h>
-#include <sof/ipc.h>
-#include <sof/io.h>
-#include <sof/trace.h>
-#include <sof/audio/component.h>
-#include <sof/drivers/timer.h>
-#include <sof/cpu.h>
-#include <sof/notifier.h>
-#include <sof/spi.h>
-#include <config.h>
-#include <sof/string.h>
-#include <version.h>
 #include <cavs/version.h>
+#if (CONFIG_CAVS_LPS)
+#include <cavs/lps_wait.h>
+#endif
+#include <cavs/mem_window.h>
+#include <sof/common.h>
+#include <sof/compiler_info.h>
+#include <sof/debug/debug.h>
+#include <sof/drivers/dw-dma.h>
+#include <sof/drivers/idc.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/drivers/ipc.h>
+#include <sof/drivers/timer.h>
+#include <sof/fw-ready-metadata.h>
+#include <sof/lib/agent.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/clk.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/dai.h>
+#include <sof/lib/dma.h>
+#include <sof/lib/io.h>
+#include <sof/lib/mailbox.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/notifier.h>
+#include <sof/lib/pm_runtime.h>
+#include <sof/lib/wait.h>
+#include <sof/platform.h>
+#include <sof/schedule/edf_schedule.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/ll_schedule_domain.h>
+#include <sof/trace/dma-trace.h>
+#include <sof/trace/trace.h>
+#include <ipc/header.h>
+#include <ipc/info.h>
+#include <kernel/abi.h>
+#include <config.h>
+#include <version.h>
+#include <errno.h>
+#include <stdint.h>
 
 static const struct sof_ipc_fw_ready ready
-	__attribute__((section(".fw_ready"))) = {
+	__section(".fw_ready") = {
 	.hdr = {
 		.cmd = SOF_IPC_FW_READY,
 		.size = sizeof(struct sof_ipc_fw_ready),
@@ -50,7 +59,7 @@ static const struct sof_ipc_fw_ready ready
 		.micro = SOF_MICRO,
 		.minor = SOF_MINOR,
 		.major = SOF_MAJOR,
-#ifdef CONFIG_DEBUG
+#if CONFIG_DEBUG
 		/* only added in debug for reproducability in releases */
 		.build = SOF_BUILD,
 		.date = __DATE__,
@@ -62,12 +71,13 @@ static const struct sof_ipc_fw_ready ready
 	.flags = DEBUG_SET_FW_READY_FLAGS,
 };
 
-#if defined(CONFIG_MEM_WND)
+#if CONFIG_MEM_WND
 #define SRAM_WINDOW_HOST_OFFSET(x) (0x80000 + x * 0x20000)
 
 #define NUM_WINDOWS 7
 
-static const struct sof_ipc_window sram_window = {
+static const struct sof_ipc_window sram_window
+	__section(".fw_ready_metadata") = {
 	.ext_hdr	= {
 		.hdr.cmd = SOF_IPC_FW_READY,
 		.hdr.size = sizeof(struct sof_ipc_window) +
@@ -129,61 +139,19 @@ static const struct sof_ipc_window sram_window = {
 };
 #endif
 
-struct timesource_data platform_generic_queue[] = {
-{
-	.timer	 = {
-		.id = TIMER3, /* external timer */
-		.irq = IRQ_EXT_TSTAMP0_LVL2(0),
-	},
-	.clk		= CLK_SSP,
-	.notifier	= NOTIFIER_ID_SSP_FREQ,
-	.timer_set	= platform_timer_set,
-	.timer_clear	= platform_timer_clear,
-	.timer_get	= platform_timer_get,
-},
-{
-	.timer	 = {
-		.id = TIMER3, /* external timer */
-		.irq = IRQ_EXT_TSTAMP0_LVL2(1),
-	},
-	.clk		= CLK_SSP,
-	.notifier	= NOTIFIER_ID_SSP_FREQ,
-	.timer_set	= platform_timer_set,
-	.timer_clear	= platform_timer_clear,
-	.timer_get	= platform_timer_get,
-},
-#if CAVS_VERSION >= CAVS_VERSION_1_8
-{
-	.timer	 = {
-		.id = TIMER3, /* external timer */
-		.irq = IRQ_EXT_TSTAMP0_LVL2(2),
-	},
-	.clk		= CLK_SSP,
-	.notifier	= NOTIFIER_ID_SSP_FREQ,
-	.timer_set	= platform_timer_set,
-	.timer_clear	= platform_timer_clear,
-	.timer_get	= platform_timer_get,
-},
-{
-	.timer	 = {
-		.id = TIMER3, /* external timer */
-		.irq = IRQ_EXT_TSTAMP0_LVL2(3),
-	},
-	.clk		= CLK_SSP,
-	.notifier	= NOTIFIER_ID_SSP_FREQ,
-	.timer_set	= platform_timer_set,
-	.timer_clear	= platform_timer_clear,
-	.timer_get	= platform_timer_get,
-},
+#if CONFIG_CANNONLAKE || CONFIG_ICELAKE || CONFIG_TIGERLAKE
+#if CONFIG_CAVS_LPRO
+#define CAVS_DEFAULT_RO		SHIM_CLKCTL_RLROSCC
+#define CAVS_DEFAULT_RO_FOR_MEM	SHIM_CLKCTL_OCS_LP_RING
+#else
+#define CAVS_DEFAULT_RO		SHIM_CLKCTL_RHROSCC
+#define CAVS_DEFAULT_RO_FOR_MEM	SHIM_CLKCTL_OCS_HP_RING
 #endif
-};
-
-#if defined(CONFIG_IOMUX)
-#include <sof/iomux.h>
 #endif
 
-#if defined(CONFIG_DW_GPIO)
-#include <sof/gpio.h>
+#if CONFIG_DW_GPIO
+
+#include <sof/drivers/gpio.h>
 
 const struct gpio_pin_config gpio_data[] = {
 	{	/* GPIO0 */
@@ -269,6 +237,10 @@ const struct gpio_pin_config gpio_data[] = {
 
 const int n_gpios = ARRAY_SIZE(gpio_data);
 
+#if CONFIG_INTEL_IOMUX
+
+#include <sof/drivers/iomux.h>
+
 struct iomux iomux_data[] = {
 	{.base = EXT_CTRL_BASE + 0x30,},
 	{.base = EXT_CTRL_BASE + 0x34,},
@@ -277,9 +249,27 @@ struct iomux iomux_data[] = {
 
 const int n_iomux = ARRAY_SIZE(iomux_data);
 
+#endif
+
+#endif
+
+SHARED_DATA struct timer timer = {
+	.id = TIMER3, /* external timer */
+	.irq = IRQ_EXT_TSTAMP0_LVL2,
+	.irq_name = irq_name_level2,
+};
+
+SHARED_DATA struct timer arch_timer = {
+	.id = TIMER1, /* internal timer */
+	.irq = IRQ_NUM_TIMER2,
+};
+
+#if CONFIG_DW_SPI
+
+#include <sof/drivers/spi.h>
+
 static struct spi_platform_data spi = {
 	.base		= DW_SPI_SLAVE_BASE,
-	.irq		= IRQ_EXT_LP_GPDMA0_LVL5(0, 0),
 	.type		= SOF_SPI_INTEL_SLAVE,
 	.fifo[SPI_DIR_RX] = {
 		.handshake	= DMA_HANDSHAKE_SSI_RX,
@@ -288,24 +278,38 @@ static struct spi_platform_data spi = {
 		.handshake	= DMA_HANDSHAKE_SSI_TX,
 	}
 };
-#endif
 
-struct timer *platform_timer =
-	&platform_generic_queue[PLATFORM_MASTER_CORE_ID].timer;
-
-#if defined(CONFIG_DW_SPI)
 int platform_boot_complete(uint32_t boot_message)
 {
 	return spi_push(spi_get(SOF_SPI_INTEL_SLAVE), &ready, sizeof(ready));
 }
+
 #else
+
 int platform_boot_complete(uint32_t boot_message)
 {
-	mailbox_dspbox_write(0, &ready, sizeof(ready));
-#if defined(CONFIG_MEM_WND)
-	mailbox_dspbox_write(sizeof(ready), &sram_window,
-		sram_window.ext_hdr.hdr.size);
-#endif // defined(CONFIG_MEM_WND)
+	uint32_t mb_offset = 0;
+
+	mailbox_dspbox_write(mb_offset, &ready, sizeof(ready));
+	mb_offset = mb_offset + sizeof(ready);
+
+#if CONFIG_MEM_WND
+	mailbox_dspbox_write(mb_offset, &sram_window,
+			     sram_window.ext_hdr.hdr.size);
+	mb_offset = mb_offset + sram_window.ext_hdr.hdr.size;
+#endif
+
+	/* variable length compiler description is a last field of cc_version */
+	mailbox_dspbox_write(mb_offset, &cc_version,
+			     cc_version.ext_hdr.hdr.size);
+	mb_offset = mb_offset + cc_version.ext_hdr.hdr.size;
+
+	mailbox_dspbox_write(mb_offset, &probe_support,
+			     probe_support.ext_hdr.hdr.size);
+	mb_offset = mb_offset + probe_support.ext_hdr.hdr.size;
+
+	mailbox_dspbox_write(mb_offset, &user_abi_version,
+			     user_abi_version.ext_hdr.hdr.size);
 
 	/* tell host we are ready */
 #if CAVS_VERSION == CAVS_VERSION_1_5
@@ -317,41 +321,7 @@ int platform_boot_complete(uint32_t boot_message)
 #endif
 	return 0;
 }
-#endif
 
-#if defined(CONFIG_MEM_WND)
-static void platform_memory_windows_init(void)
-{
-	/* window0, for fw status & outbox/uplink mbox */
-	io_reg_write(DMWLO(0), HP_SRAM_WIN0_SIZE | 0x7);
-	io_reg_write(DMWBA(0), HP_SRAM_WIN0_BASE
-		| DMWBA_READONLY | DMWBA_ENABLE);
-	bzero((void *)(HP_SRAM_WIN0_BASE + SRAM_REG_FW_END),
-	      HP_SRAM_WIN0_SIZE - SRAM_REG_FW_END);
-	dcache_writeback_region((void *)(HP_SRAM_WIN0_BASE + SRAM_REG_FW_END),
-				HP_SRAM_WIN0_SIZE - SRAM_REG_FW_END);
-
-	/* window1, for inbox/downlink mbox */
-	io_reg_write(DMWLO(1), HP_SRAM_WIN1_SIZE | 0x7);
-	io_reg_write(DMWBA(1), HP_SRAM_WIN1_BASE
-		| DMWBA_ENABLE);
-	bzero((void *)HP_SRAM_WIN1_BASE, HP_SRAM_WIN1_SIZE);
-	dcache_writeback_region((void *)HP_SRAM_WIN1_BASE, HP_SRAM_WIN1_SIZE);
-
-	/* window2, for debug */
-	io_reg_write(DMWLO(2), HP_SRAM_WIN2_SIZE | 0x7);
-	io_reg_write(DMWBA(2), HP_SRAM_WIN2_BASE
-		| DMWBA_ENABLE);
-	bzero((void *)HP_SRAM_WIN2_BASE, HP_SRAM_WIN2_SIZE);
-	dcache_writeback_region((void *)HP_SRAM_WIN2_BASE, HP_SRAM_WIN2_SIZE);
-
-	/* window3, for trace
-	 * zeroed by trace initialization
-	 */
-	io_reg_write(DMWLO(3), HP_SRAM_WIN3_SIZE | 0x7);
-	io_reg_write(DMWBA(3), HP_SRAM_WIN3_BASE
-		| DMWBA_READONLY | DMWBA_ENABLE);
-}
 #endif
 
 #if CAVS_VERSION >= CAVS_VERSION_1_8
@@ -365,7 +335,7 @@ static void platform_init_hw(void)
 		IOPO_DMIC_FLAG | IOPO_I2S_FLAG);
 
 	io_reg_write(DSP_INIT_ALHO,
-		ALHO_ASO_FLAG | ALHO_CSO_FLAG | ALHO_CFO_FLAG);
+		ALHO_ASO_FLAG | ALHO_CSO_FLAG);
 
 	io_reg_write(DSP_INIT_LPGPDMA(0),
 		LPGPDMA_CHOSEL_FLAG | LPGPDMA_CTLOSEL_FLAG);
@@ -376,13 +346,26 @@ static void platform_init_hw(void)
 
 int platform_init(struct sof *sof)
 {
-#if defined(CONFIG_DW_SPI)
+#if CONFIG_DW_SPI
 	struct spi *spi_dev;
 #endif
 	int ret;
+	int i;
 
-#if defined(CONFIG_CANNONLAKE) || defined(CONFIG_ICELAKE) \
-	|| defined(CONFIG_SUECREEK)
+	sof->platform_timer = cache_to_uncache(&timer);
+	sof->cpu_timer = cache_to_uncache(&arch_timer);
+
+	/* Turn off memory for all unused cores */
+	for (i = 0; i < PLATFORM_CORE_COUNT; i++)
+		if (i != PLATFORM_MASTER_CORE_ID)
+			pm_runtime_put(CORE_MEMORY_POW, i);
+
+	/* pm runtime already initialized, request the DSP to stay in D0
+	 * until we are allowed to do full power gating (by the IPC req).
+	 */
+	pm_runtime_disable(PM_RUNTIME_DSP, 0);
+
+#if CONFIG_CANNONLAKE || CONFIG_ICELAKE || CONFIG_SUECREEK || CONFIG_TIGERLAKE
 	trace_point(TRACE_BOOT_PLATFORM_ENTRY);
 	platform_init_hw();
 #endif
@@ -390,28 +373,34 @@ int platform_init(struct sof *sof)
 	trace_point(TRACE_BOOT_PLATFORM_IRQ);
 	platform_interrupt_init();
 
-#if defined(CONFIG_MEM_WND)
+#if CONFIG_MEM_WND
 	trace_point(TRACE_BOOT_PLATFORM_MBOX);
-	platform_memory_windows_init();
+	platform_memory_windows_init(MEM_WND_INIT_CLEAR);
 #endif
 
 	/* init timers, clocks and schedulers */
 	trace_point(TRACE_BOOT_PLATFORM_TIMER);
-	platform_timer_start(platform_timer);
+	platform_timer_start(sof->platform_timer);
 
 	trace_point(TRACE_BOOT_PLATFORM_CLOCK);
-	clock_init();
+	platform_clock_init(sof);
 
 	trace_point(TRACE_BOOT_PLATFORM_SCHED);
-	scheduler_init();
+	scheduler_init_edf();
+
+	/* init low latency timer domain and scheduler */
+	sof->platform_timer_domain =
+		timer_domain_init(sof->platform_timer, PLATFORM_DEFAULT_CLOCK,
+				  CONFIG_SYSTICK_PERIOD);
+	scheduler_init_ll(sof->platform_timer_domain);
 
 	/* init the system agent */
 	trace_point(TRACE_BOOT_PLATFORM_AGENT);
-	sa_init(sof);
+	sa_init(sof, CONFIG_SYSTICK_PERIOD);
 
 	/* Set CPU to max frequency for booting (single shim_write below) */
 	trace_point(TRACE_BOOT_PLATFORM_CPU_FREQ);
-#if defined(CONFIG_APOLLOLAKE)
+#if CONFIG_APOLLOLAKE
 	/* initialize PM for boot */
 
 	/* TODO: there are two clk freqs CRO & CRO/4
@@ -430,31 +419,32 @@ int platform_init(struct sof *sof)
 
 	shim_write(SHIM_LPSCTL, shim_read(SHIM_LPSCTL));
 
-#elif defined(CONFIG_CANNONLAKE)
+#elif CONFIG_CANNONLAKE || CONFIG_ICELAKE || CONFIG_TIGERLAKE
 
 	/* initialize PM for boot */
+
+	/* request configured ring oscillator and wait for status ready */
+	shim_write(SHIM_CLKCTL, shim_read(SHIM_CLKCTL) | CAVS_DEFAULT_RO);
+	while (!(shim_read(SHIM_CLKSTS) & CAVS_DEFAULT_RO))
+		idelay(16);
+
 	shim_write(SHIM_CLKCTL,
-		   SHIM_CLKCTL_RHROSCC | /* Request High Performance RING Osc */
-		   SHIM_CLKCTL_OCS_HP_RING | /* Select HP RING Oscillator Clk
-					      * for memory
-					      */
+		   CAVS_DEFAULT_RO | /* Request configured RING Osc */
+		   CAVS_DEFAULT_RO_FOR_MEM | /* Select configured
+					     * RING Oscillator Clk for memory
+					     */
 		   SHIM_CLKCTL_HMCS_DIV2 | /* HP mem clock div by 2 */
 		   SHIM_CLKCTL_LMCS_DIV4 | /* LP mem clock div by 4 */
-		   SHIM_CLKCTL_TCPLCG_DIS(0) | /* Allow Local Clk Gating */
-		   SHIM_CLKCTL_TCPLCG_DIS(1) |
-		   SHIM_CLKCTL_TCPLCG_DIS(2) |
-		   SHIM_CLKCTL_TCPLCG_DIS(3));
+		   SHIM_CLKCTL_TCPLCG_DIS_ALL); /* Allow Local Clk Gating */
 
 	/* prevent LP GPDMA 0&1 clock gating */
 	shim_write(SHIM_GPDMA_CLKCTL(0), SHIM_CLKCTL_LPGPDMAFDCGB);
 	shim_write(SHIM_GPDMA_CLKCTL(1), SHIM_CLKCTL_LPGPDMAFDCGB);
 
 	/* prevent DSP Common power gating */
-	shim_write16(SHIM_PWRCTL, SHIM_PWRCTL_TCPDSPPG(0) |
-		     SHIM_PWRCTL_TCPDSPPG(1) | SHIM_PWRCTL_TCPDSPPG(2) |
-		     SHIM_PWRCTL_TCPDSPPG(3));
+	pm_runtime_get(PM_RUNTIME_DSP, PLATFORM_MASTER_CORE_ID);
 
-#elif defined(CONFIG_ICELAKE) || defined(CONFIG_SUECREEK)
+#elif CONFIG_SUECREEK
 	/* TODO: need to merge as for APL */
 	clock_set_freq(CLK_CPU(cpu_get_id()), CLK_MAX_CPU_HZ);
 
@@ -463,20 +453,26 @@ int platform_init(struct sof *sof)
 		SHIM_CLKCTL_TCPLCG(0));
 
 	/* prevent LP GPDMA 0&1 clock gating */
-	io_reg_write(GPDMA_CLKCTL(0), GPDMA_FDCGB);
-	io_reg_write(GPDMA_CLKCTL(1), GPDMA_FDCGB);
+	shim_write(SHIM_GPDMA_CLKCTL(0), SHIM_CLKCTL_LPGPDMAFDCGB);
+	shim_write(SHIM_GPDMA_CLKCTL(1), SHIM_CLKCTL_LPGPDMAFDCGB);
 
 	/* prevent DSP Common power gating */
-	shim_write16(SHIM_PWRCTL, SHIM_PWRCTL_TCPDSPPG(0) |
-		     SHIM_PWRCTL_TCPDSPPG(1) | SHIM_PWRCTL_TCPDSPPG(2) |
-		     SHIM_PWRCTL_TCPDSPPG(3));
+	pm_runtime_get(PM_RUNTIME_DSP, PLATFORM_MASTER_CORE_ID);
 #endif
 
 	/* init DMACs */
 	trace_point(TRACE_BOOT_PLATFORM_DMA);
-	ret = dmac_init();
+	ret = dmac_init(sof);
 	if (ret < 0)
 		return ret;
+
+	/* init low latency single channel DW-DMA domain and scheduler */
+	sof->platform_dma_domain =
+		dma_single_chan_domain_init
+			(&sof->dma_info->dma_array[PLATFORM_DW_DMA_INDEX],
+			 PLATFORM_NUM_DW_DMACS,
+			 PLATFORM_DEFAULT_CLOCK);
+	scheduler_init_ll(sof->platform_dma_domain);
 
 	/* initialize the host IPC mechanisms */
 	trace_point(TRACE_BOOT_PLATFORM_IPC);
@@ -490,11 +486,11 @@ int platform_init(struct sof *sof)
 
 	/* init DAIs */
 	trace_point(TRACE_BOOT_PLATFORM_DAI);
-	ret = dai_init();
+	ret = dai_init(sof);
 	if (ret < 0)
 		return ret;
 
-#if defined(CONFIG_DW_SPI)
+#if CONFIG_DW_SPI
 	/* initialize the SPI slave */
 	trace_point(TRACE_BOOT_PLATFORM_SPI);
 	spi_init();
@@ -520,4 +516,19 @@ int platform_init(struct sof *sof)
 	heap_trace_all(1);
 
 	return 0;
+}
+
+void platform_wait_for_interrupt(int level)
+{
+#if CONFIG_CAVS_USE_LPRO_IN_WAITI
+	platform_clock_on_waiti();
+#endif
+#if (CONFIG_CAVS_LPS)
+	if (pm_runtime_is_active(PM_RUNTIME_DSP, PLATFORM_MASTER_CORE_ID))
+		arch_wait_for_interrupt(level);
+	else
+		lps_wait_for_interrupt(level);
+#else
+	arch_wait_for_interrupt(level);
+#endif
 }

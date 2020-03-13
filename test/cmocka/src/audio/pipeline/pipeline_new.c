@@ -7,11 +7,12 @@
 #include <stdint.h>
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
-#include <sof/schedule.h>
+#include <sof/schedule/schedule.h>
 #include "pipeline_mocks.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
+#include <malloc.h>
 #include <cmocka.h>
 
 static int setup(void **state)

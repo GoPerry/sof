@@ -5,30 +5,22 @@
 // Author: Bartosz Kokoszko <bartoszx.kokoszko@linux.intel.com>
 
 #include <sof/audio/component.h>
-#include <sof/task.h>
+#include <sof/schedule/task.h>
 #include <stdint.h>
-#include <sof/edf_schedule.h>
-#include <sof/wait.h>
+#include <sof/schedule/edf_schedule.h>
+#include <sof/lib/wait.h>
+#include <stdlib.h>
 
  /* scheduler testbench definition */
 
 struct edf_schedule_data {
-	spinlock_t lock; /* schedule lock */
 	struct list_item list; /* list of tasks in priority queue */
 	uint32_t clock;
 };
 
-static struct edf_schedule_data *sch;
+struct scheduler_ops schedule_edf_ops;
 
-static void schedule_edf_task_complete(struct task *task);
-static void schedule_edf_task(struct task *task, uint64_t start,
-			      uint64_t deadline, uint32_t flags);
-static int schedule_edf_task_init(struct task *task, uint32_t xflags);
-static int edf_scheduler_init(void);
-static void edf_scheduler_free(void);
-static void schedule_edf(void);
-static int schedule_edf_task_cancel(struct task *task);
-static void schedule_edf_task_free(struct task *task);
+static struct edf_schedule_data *sch;
 
 static void schedule_edf_task_complete(struct task *task)
 {
@@ -37,66 +29,74 @@ static void schedule_edf_task_complete(struct task *task)
 }
 
 /* schedule task */
-static void schedule_edf_task(struct task *task, uint64_t start,
-			      uint64_t deadline, uint32_t flags)
+static void schedule_edf_task(void *data, struct task *task, uint64_t start,
+			      uint64_t period)
 {
-	(void)deadline;
+	struct edf_schedule_data *sch = data;
+	(void)period;
 	list_item_prepend(&task->list, &sch->list);
 	task->state = SOF_TASK_STATE_QUEUED;
 
-	if (task->func)
-		task->func(task->data);
+	if (task->ops.run)
+		task->ops.run(task->data);
 
 	schedule_edf_task_complete(task);
 }
 
-static int schedule_edf_task_init(struct task *task, uint32_t xflags)
+int schedule_task_init_edf(struct task *task, const struct task_ops *ops,
+			   void *data, uint16_t core, uint32_t flags)
 {
 	struct edf_task_pdata *edf_pdata;
-	(void)xflags;
+	int ret = 0;
+
+	ret = schedule_task_init(task, SOF_SCHEDULE_EDF, 0, ops->run, data,
+				 core, flags);
+	if (ret < 0)
+		return ret;
 
 	edf_pdata = malloc(sizeof(*edf_pdata));
 	edf_sch_set_pdata(task, edf_pdata);
+
+	task->ops.complete = ops->complete;
 
 	return 0;
 }
 
 /* initialize scheduler */
-static int edf_scheduler_init(void)
+int scheduler_init_edf(void)
 {
 	trace_edf_sch("edf_scheduler_init()");
 	sch = malloc(sizeof(*sch));
 	list_init(&sch->list);
-	spinlock_init(&sch->lock);
+
+	scheduler_init(SOF_SCHEDULE_EDF, &schedule_edf_ops, sch);
 
 	return 0;
 }
 
-static void edf_scheduler_free(void)
+static void edf_scheduler_free(void *data)
 {
-	free(sch);
+	free(data);
 }
 
 /* The following definitions are to satisfy libsof linker errors */
-static void schedule_edf(void)
+static void schedule_edf(void *data)
 {
 }
 
-static int schedule_edf_task_cancel(struct task *task)
+static void schedule_edf_task_cancel(void *data, struct task *task)
 {
 	if (task->state == SOF_TASK_STATE_QUEUED) {
 		/* delete task */
 		task->state = SOF_TASK_STATE_CANCEL;
 		list_item_del(&task->list);
 	}
-
-	return 0;
 }
 
-static void schedule_edf_task_free(struct task *task)
+static void schedule_edf_task_free(void *data, struct task *task)
 {
 	task->state = SOF_TASK_STATE_FREE;
-	task->func = NULL;
+	task->ops.run = NULL;
 	task->data = NULL;
 
 	free(edf_sch_get_pdata(task));
@@ -105,13 +105,11 @@ static void schedule_edf_task_free(struct task *task)
 
 struct scheduler_ops schedule_edf_ops = {
 	.schedule_task		= schedule_edf_task,
-	.schedule_task_init	= schedule_edf_task_init,
 	.schedule_task_running	= NULL,
 	.schedule_task_complete = NULL,
 	.reschedule_task	= NULL,
 	.schedule_task_cancel	= schedule_edf_task_cancel,
 	.schedule_task_free	= schedule_edf_task_free,
-	.scheduler_init		= edf_scheduler_init,
 	.scheduler_free		= edf_scheduler_free,
 	.scheduler_run		= schedule_edf
 };

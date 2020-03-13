@@ -39,7 +39,7 @@ fs = 48e3;
 %% -------------------
 %% Example 1: Loudness
 %% -------------------
-ascii_blob_fn = '../../eqctl/eq_fir_loudness.txt';
+ascii_blob_fn = '../../ctl/eq_fir_loudness.txt';
 binary_blob_fn = 'example_fir_eq.blob';
 tplg_blob_fn = 'example_fir_eq.m4';
 
@@ -71,7 +71,7 @@ eq_tplg_write(tplg_blob_fn, bp, 'FIR');
 %% -------------------
 %% Example 2: Mid boost
 %% -------------------
-ascii_blob_fn = '../../eqctl/eq_fir_mid.txt';
+ascii_blob_fn = '../../ctl/eq_fir_mid.txt';
 
 %% Define mid frequencies boost EQ
 eq_mid = midboost_fir_eq(fs);
@@ -96,7 +96,7 @@ eq_alsactl_write(ascii_blob_fn, bp);
 %% Example 3: Flat EQ
 %% -------------------
 comment = 'Flat FIR EQ';
-ascii_blob_fn = '../../eqctl/eq_fir_flat.txt';
+ascii_blob_fn = '../../ctl/eq_fir_flat.txt';
 tplg_blob_fn = '../../topology/m4/eq_fir_coef_flat.m4';
 
 %% Define a passthru EQ with one tap
@@ -122,7 +122,7 @@ eq_tplg_write(tplg_blob_fn, bp, 'FIR', comment);
 %% --------------------------
 %% Example 4: Pass-through EQ
 %% --------------------------
-ascii_blob_fn = '../../eqctl/eq_fir_pass.txt';
+ascii_blob_fn = '../../ctl/eq_fir_pass.txt';
 
 %% Define a passthru EQ with one tap
 b_pass = 1;
@@ -203,7 +203,7 @@ function eq = midboost_fir_eq(fs)
 eq = eq_defaults();
 
 eq.parametric_target_response = [ ...
-					eq.PEQ_LS2 1000 -12 NaN ; ...
+					eq.PEQ_LS2 1200 -12 NaN ; ...
 					eq.PEQ_HS2 7000 -12 NaN ; ...
 				];
 
@@ -214,7 +214,7 @@ eq.norm_offs_db = 0;   % E.g. -1 would leave 1 dB headroom if used with peak
 
 eq.enable_fir = 1;     % By default both FIR and IIR disabled, enable one
 eq.fir_beta = 3.5;     % Use with care, low value can corrupt
-eq.fir_length = 86;    % Gives just < 292 bytes
+eq.fir_length = 39;    % At limit of xtensa-gcc build speed
 eq.fir_autoband = 0;   % Select manually frequency limits
 eq.fmin_fir = 100;     % Equalization starts from 100 Hz
 eq.fmax_fir = 20e3;    % Equalization ends at 20 kHz

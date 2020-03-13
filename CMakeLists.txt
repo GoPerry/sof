@@ -19,6 +19,7 @@ endif()
 
 option(BUILD_LIBRARY "Build library" OFF)
 option(BUILD_UNIT_TESTS "Build unit tests" OFF)
+option(BUILD_CLANG_SCAN "Build for clang's scan-build" OFF)
 
 if(BUILD_LIBRARY)
 	set(ARCH host)
@@ -60,6 +61,10 @@ target_include_directories(sof_public_headers INTERFACE ${PROJECT_SOURCE_DIR}/sr
 add_library(sof_options INTERFACE)
 
 target_link_libraries(sof_options INTERFACE sof_public_headers)
+
+# interface library that is used only as container for sof statically
+# linked libraries
+add_library(sof_static_libraries INTERFACE)
 
 # get compiler name and version
 execute_process(
@@ -117,9 +122,12 @@ target_include_directories(sof_public_headers INTERFACE ${GENERATED_DIRECTORY}/i
 if(BUILD_LIBRARY)
 	add_library(sof SHARED "")
 	target_link_libraries(sof PRIVATE sof_options)
+	target_link_libraries(sof PRIVATE sof_static_libraries)
 	install(TARGETS sof DESTINATION lib)
 
 	add_subdirectory(src)
+
+	sof_append_relative_path_definitions(sof)
 
 	get_target_property(incdirs sof_public_headers INTERFACE_INCLUDE_DIRECTORIES)
 
@@ -163,12 +171,13 @@ add_library(sof_ld_scripts INTERFACE)
 
 # declare target with no sources to let cmake know about it
 add_executable(sof "")
-target_link_libraries(sof sof_options)
-target_link_libraries(sof sof_ld_scripts)
-target_link_libraries(sof sof_ld_flags)
+target_link_libraries(sof PRIVATE sof_options)
+target_link_libraries(sof PRIVATE sof_ld_scripts)
+target_link_libraries(sof PRIVATE sof_ld_flags)
+target_link_libraries(sof PRIVATE sof_static_libraries)
 
 sof_add_build_counter_rule()
 
 add_subdirectory(src)
 
-target_link_libraries(sof sof_lib)
+sof_append_relative_path_definitions(sof)

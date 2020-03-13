@@ -3,7 +3,8 @@
  * Copyright(c) 2018 Intel Corporation. All rights reserved.
  */
 
-#include <arch/offset-defs.h>
+#include <arch/debug/offset-defs.h>
+#include <xtensa/config/core-isa.h>
 #include <xtensa/corebits.h>
 
 	.section .text, "ax"
@@ -16,7 +17,6 @@ literals:
 /*
  * params:
  * a2 - ptr to dump mem buffer
- * a3 - original PS
  */
 arch_dump_regs_a:
 	entry a1, 16
@@ -33,7 +33,8 @@ arch_dump_regs_a:
 	s32i a7, a2, REG_OFFSET_AR_BEGIN + 0x1c
 	memw
 
-	/* store original PS */
+	/* store PS */
+	rsr a3, PS
 	s32i a3, a2, REG_OFFSET_PS
 
 	/*

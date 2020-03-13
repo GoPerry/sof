@@ -6,17 +6,18 @@
 //         Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
-#include <stdint.h>
-#include <stddef.h>
-#include <errno.h>
-#include <sof/audio/component.h>
 #include <sof/audio/eq_fir/fir_config.h>
-#include <sof/audio/format.h>
-#include <user/eq.h>
 
 #if FIR_GENERIC
 
+#include <sof/common.h>
+#include <sof/audio/buffer.h>
 #include <sof/audio/eq_fir/fir.h>
+#include <sof/audio/format.h>
+#include <user/eq.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /*
  * EQ FIR algorithm code
@@ -33,22 +34,26 @@ void fir_reset(struct fir_state_32x16 *fir)
 	 */
 }
 
-size_t fir_init_coef(struct fir_state_32x16 *fir,
-		     struct sof_eq_fir_coef_data *config)
+int fir_delay_size(struct sof_eq_fir_coef_data *config)
+{
+	/* Check for sane FIR length. The generic version does not
+	 * have other constraints.
+	 */
+	if (config->length > SOF_EQ_FIR_MAX_LENGTH || config->length < 1)
+		return -EINVAL;
+
+	return config->length * sizeof(int32_t);
+}
+
+int fir_init_coef(struct fir_state_32x16 *fir,
+		  struct sof_eq_fir_coef_data *config)
 {
 	fir->rwi = 0;
 	fir->length = (int)config->length;
+	fir->taps = fir->length; /* The same for generic C version */
 	fir->out_shift = (int)config->out_shift;
-	fir->coef = &config->coef[0];
-	fir->delay = NULL;
-
-	/* Check for sane FIR length. The length is constrained to be a
-	 * multiple of 4 for optimized code.
-	 */
-	if (fir->length > SOF_EQ_FIR_MAX_LENGTH || fir->length < 1)
-		return -EINVAL;
-
-	return fir->length * sizeof(int32_t);
+	fir->coef = ASSUME_ALIGNED(&config->coef[0], 4);
+	return 0;
 }
 
 void fir_init_delay(struct fir_state_32x16 *fir, int32_t **data)
@@ -57,8 +62,9 @@ void fir_init_delay(struct fir_state_32x16 *fir, int32_t **data)
 	*data += fir->length; /* Point to next delay line start */
 }
 
-void eq_fir_s16(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch)
+#if CONFIG_FORMAT_S16LE
+void eq_fir_s16(struct fir_state_32x16 fir[], const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch)
 {
 	struct fir_state_32x16 *filter;
 	int16_t *x;
@@ -72,17 +78,19 @@ void eq_fir_s16(struct fir_state_32x16 fir[], struct comp_buffer *source,
 		filter = &fir[ch];
 		idx = ch;
 		for (i = 0; i < frames; i++) {
-			x = buffer_read_frag_s16(source, idx);
-			y = buffer_write_frag_s16(sink, idx);
+			x = audio_stream_read_frag_s16(source, idx);
+			y = audio_stream_write_frag_s16(sink, idx);
 			z = fir_32x16(filter, *x << 16);
 			*y = sat_int16(Q_SHIFT_RND(z, 31, 15));
 			idx += nch;
 		}
 	}
 }
+#endif /* CONFIG_FORMAT_S16LE */
 
-void eq_fir_s24(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch)
+#if CONFIG_FORMAT_S24LE
+void eq_fir_s24(struct fir_state_32x16 fir[], const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch)
 {
 	struct fir_state_32x16 *filter;
 	int32_t *x;
@@ -96,17 +104,19 @@ void eq_fir_s24(struct fir_state_32x16 fir[], struct comp_buffer *source,
 		filter = &fir[ch];
 		idx = ch;
 		for (i = 0; i < frames; i++) {
-			x = buffer_read_frag_s32(source, idx);
-			y = buffer_write_frag_s32(sink, idx);
+			x = audio_stream_read_frag_s32(source, idx);
+			y = audio_stream_write_frag_s32(sink, idx);
 			z = fir_32x16(filter, *x << 8);
 			*y = sat_int24(Q_SHIFT_RND(z, 31, 23));
 			idx += nch;
 		}
 	}
 }
+#endif /* CONFIG_FORMAT_S24LE */
 
-void eq_fir_s32(struct fir_state_32x16 fir[], struct comp_buffer *source,
-		struct comp_buffer *sink, int frames, int nch)
+#if CONFIG_FORMAT_S32LE
+void eq_fir_s32(struct fir_state_32x16 fir[], const struct audio_stream *source,
+		struct audio_stream *sink, int frames, int nch)
 {
 	struct fir_state_32x16 *filter;
 	int32_t *x;
@@ -119,12 +129,13 @@ void eq_fir_s32(struct fir_state_32x16 fir[], struct comp_buffer *source,
 		filter = &fir[ch];
 		idx = ch;
 		for (i = 0; i < frames; i++) {
-			x = buffer_read_frag_s32(source, idx);
-			y = buffer_write_frag_s32(sink, idx);
+			x = audio_stream_read_frag_s32(source, idx);
+			y = audio_stream_write_frag_s32(sink, idx);
 			*y = fir_32x16(filter, *x);
 			idx += nch;
 		}
 	}
 }
+#endif /* CONFIG_FORMAT_S32LE */
 
 #endif

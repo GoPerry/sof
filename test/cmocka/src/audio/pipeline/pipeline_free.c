@@ -7,12 +7,14 @@
 #include <stdint.h>
 #include <sof/audio/component.h>
 #include <sof/audio/pipeline.h>
-#include <sof/edf_schedule.h>
+#include <sof/schedule/edf_schedule.h>
+#include <sof/schedule/task.h>
 #include "pipeline_mocks.h"
 #include "pipeline_connection_mocks.h"
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
+#include <malloc.h>
 #include <cmocka.h>
 
 static int setup(void **state)
@@ -71,15 +73,17 @@ static void test_audio_pipeline_free_sheduler_task_free(void **state)
 	/*Testing component*/
 	pipeline_free(&result);
 
-	assert_int_equal(result.pipe_task.state, SOF_TASK_STATE_FREE);
-	assert_ptr_equal(NULL, result.pipe_task.data);
-	assert_ptr_equal(NULL, result.pipe_task.func);
+	assert_int_equal(result.pipe_task->state, SOF_TASK_STATE_FREE);
+	assert_ptr_equal(NULL, result.pipe_task->data);
+	assert_ptr_equal(NULL, result.pipe_task->ops.run);
 }
 
 static void test_audio_pipeline_free_disconnect_full(void **state)
 {
 	struct pipeline_connect_data *test_data = *state;
 	struct pipeline result = test_data->p;
+	struct sof_ipc_comp *first_comp;
+	struct sof_ipc_comp *second_comp;
 
 	cleanup_test_data(test_data);
 
@@ -87,8 +91,10 @@ static void test_audio_pipeline_free_disconnect_full(void **state)
 	result.source_comp = test_data->first;
 	test_data->first->pipeline = &result;
 	test_data->second->pipeline = &result;
-	test_data->second->comp.pipeline_id = PIPELINE_ID_SAME;
-	test_data->first->comp.pipeline_id = PIPELINE_ID_SAME;
+	first_comp = dev_comp(test_data->first);
+	second_comp = dev_comp(test_data->second);
+	second_comp->pipeline_id = PIPELINE_ID_SAME;
+	first_comp->pipeline_id = PIPELINE_ID_SAME;
 	test_data->b1->source = test_data->first;
 	list_item_append(&result.sched_comp->bsink_list,
 					 &test_data->b1->source_list);

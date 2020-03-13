@@ -4,17 +4,19 @@
 //
 // Author: Michal Jerzy Wierzbicki <michalx.wierzbicki@linux.intel.com>
 
-#include <sof/alloc.h>
+#include <sof/lib/alloc.h>
 
 #include <stdio.h>
 #include <stdarg.h>
 #include <setjmp.h>
 #include <stdint.h>
+#include <malloc.h>
 #include <cmocka.h>
 
-#include <sof/preproc.h>
+#include <sof/trace/preproc.h>
 #include <sof/sof.h>
-#include <sof/trace.h>
+#include <sof/trace/trace.h>
+#include <user/trace.h>
 
 #define CAPTURE(aggr, ...)\
 	META_RECURSE(META_MAP(1, META_QUOTE, aggr, __VA_ARGS__))
@@ -25,7 +27,6 @@ static void test_debugability_macros_declare_log_entry(void **state)
 		LOG_LEVEL_CRITICAL,
 		"Message",
 		TRACE_CLASS_DMA,
-		1,
 		1
 	));
 	const char *should_be_eq =
@@ -35,22 +36,20 @@ static void test_debugability_macros_declare_log_entry(void **state)
 		"{ "
 			"uint32_t level; "
 			"uint32_t component_class; "
-			"uint32_t has_ids; "
 			"uint32_t params_num; "
 			"uint32_t line_idx; "
 			"uint32_t file_name_len; "
 			"uint32_t text_len; "
-			"const char file_name[sizeof(\"" __FILE__ "\")]; "
+			"const char file_name[sizeof(\"" RELATIVE_FILE "\")]; "
 			"const char text[sizeof(\"Message\")]; "
 		"} log_entry = { "
 			"1"
 			"(6 << 24)"
 			"1"
-			"1"
-			"30"
-			"sizeof(\"" __FILE__ "\")"
+			"31"
+			"sizeof(\"" RELATIVE_FILE "\")"
 			"sizeof(\"Message\")"
-			"\"" __FILE__ "\""
+			"\"" RELATIVE_FILE "\""
 			"\"Message\" "
 		"}";
 	(void)state;
@@ -87,7 +86,7 @@ static char *get_should_be(const int param_count)
 	/*3*/param_count,
 	/*4*/") ? 1 : -1]; _trace_event",
 	/*5*/param_count,
-	/*6*/" ((uint32_t)&log_entry, 1, 1",
+	/*6*/" ((uint32_t)&log_entry, 0, 1, 1",
 	/*7*/paramlist,
 	/*8*/"); }"
 	);
@@ -103,11 +102,11 @@ do {								\
 		LOG_LEVEL_CRITICAL,				\
 		"Message",					\
 		TRACE_CLASS_DMA,				\
-		META_COUNT_VARAGS_BEFORE_COMPILE(__VA_ARGS__),	\
-		1						\
+		META_COUNT_VARAGS_BEFORE_COMPILE(__VA_ARGS__)	\
 	);							\
 	const char *macro_result = CAPTURE(BASE_LOG(		\
 		_trace_event,					\
+		0,						\
 		1,						\
 		1,						\
 		&log_entry,					\

@@ -4,23 +4,29 @@
 //
 // Author: Guennadi Liakhovetski <guennadi.liakhovetski@linux.intel.com>
 
-#include <errno.h>
-#include <stdbool.h>
+#include <sof/common.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/gpio.h>
+#include <sof/drivers/ipc.h>
+#include <sof/drivers/spi.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/clk.h>
+#include <sof/lib/dma.h>
+#include <sof/lib/io.h>
+#include <sof/lib/mailbox.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/wait.h>
+#include <sof/platform.h>
+#include <sof/schedule/ll_schedule.h>
+#include <sof/schedule/schedule.h>
+#include <sof/schedule/task.h>
+#include <sof/spinlock.h>
+#include <sof/string.h>
+#include <ipc/header.h>
+#include <ipc/topology.h>
+#include <stddef.h>
 #include <stdint.h>
-
-#include <sof/clk.h>
-#include <sof/dma.h>
-#include <sof/gpio.h>
-#include <sof/io.h>
-#include <sof/ipc.h>
-#include <sof/lock.h>
-#include <sof/sof.h>
-#include <sof/spi.h>
-#include <sof/schedule.h>
-
-#include <platform/dma.h>
-#include <platform/memory.h>
-#include <platform/platform.h>
 
 #define	SPI_REG_CTRLR0		0x00
 #define	SPI_REG_CTRLR1		0x04
@@ -102,14 +108,13 @@ struct spi_dma_config {
 
 struct spi_reg_list {
 	uint32_t ctrlr0;
-	uint32_t ctrlr1;
 	uint32_t dmacr;		/* dma control register */
 };
 
 struct spi {
 	const struct gpio *gpio;
 	uint32_t index;
-	uint32_t chan[2];	/* spi-slave rx/tx dma */
+	struct dma_chan_data *chan[2];	/* spi-slave rx/tx dma */
 	uint32_t buffer_size;
 	uint8_t *rx_buffer;
 	uint8_t *tx_buffer;
@@ -126,8 +131,6 @@ struct spi {
 			spi->plat_data->fifo[direction].handshake
 #define spi_reg_write(spi, reg, val) \
 			io_reg_write(spi->plat_data->base + reg, val)
-
-extern struct ipc *_ipc;
 
 static void spi_start(struct spi *spi, int direction)
 {
@@ -172,7 +175,7 @@ static int spi_trigger(struct spi *spi, int cmd, int direction)
 	switch (cmd) {
 	case SPI_TRIGGER_START:
 		/* trigger the SPI-Slave + DMA + INT + Receiving */
-		ret = dma_start(spi->dma[direction], spi->chan[direction]);
+		ret = dma_start(spi->chan[direction]);
 		if (ret < 0)
 			return ret;
 
@@ -188,7 +191,7 @@ static int spi_trigger(struct spi *spi, int cmd, int direction)
 	case SPI_TRIGGER_STOP:
 		/* Stop the SPI-Slave */
 		spi_stop(spi);
-		dma_stop(spi->dma[direction], spi->chan[direction]);
+		dma_stop(spi->chan[direction]);
 
 		break;
 	default:
@@ -236,8 +239,7 @@ static int spi_slave_dma_set_config(struct spi *spi,
 		.dest_width = 4,
 	};
 	struct dma_sg_elem local_sg_elem;
-	struct dma *dma = spi->dma[spi_cfg->dir];
-	uint32_t chan = spi->chan[spi_cfg->dir];
+	struct dma_chan_data *chan = spi->chan[spi_cfg->dir];
 
 	/* dma config */
 
@@ -273,7 +275,7 @@ static int spi_slave_dma_set_config(struct spi *spi,
 	config.elem_array.count = 1;
 	config.elem_array.elems = &local_sg_elem;
 
-	return dma_set_config(dma, chan, &config);
+	return dma_set_config(chan, &config);
 }
 
 static int spi_set_config(struct spi *spi,
@@ -286,7 +288,7 @@ static int spi_set_config(struct spi *spi,
 	return spi_slave_dma_set_config(spi, spi_cfg);
 }
 
-static uint64_t spi_completion_work(void *data)
+static enum task_state spi_completion_work(void *data)
 {
 	struct spi *spi = data;
 	struct sof_ipc_hdr *hdr;
@@ -299,8 +301,7 @@ static uint64_t spi_completion_work(void *data)
 		dcache_invalidate_region(spi->rx_buffer, SPI_BUFFER_SIZE);
 		mailbox_hostbox_write(0, spi->rx_buffer, hdr->size);
 
-		_ipc->host_pending = 1;
-		ipc_schedule_process(_ipc);
+		ipc_schedule_process(ipc_get());
 
 		break;
 	case IPC_WRITE:	/* DSP -> HOST */
@@ -321,17 +322,7 @@ static uint64_t spi_completion_work(void *data)
 		break;
 	}
 
-	return 0;
-}
-
-static void spi_dma_complete(void *data, uint32_t type,
-			     struct dma_cb_data *next)
-{
-	struct spi *spi = data;
-
-	next->status = DMA_CB_STATUS_END;
-
-	schedule_task(&spi->completion, 0, 100, 0);
+	return SOF_TASK_STATE_RESCHEDULE;
 }
 
 int spi_push(struct spi *spi, const void *data, size_t size)
@@ -357,7 +348,8 @@ int spi_push(struct spi *spi, const void *data, size_t size)
 	spi->ipc_status = IPC_WRITE;
 
 	/* Actually we have to send IPC messages in one go */
-	assert(!memcpy_s(config->src_buf, config->buffer_size, data, size));
+	ret = memcpy_s(config->src_buf, config->buffer_size, data, size);
+	assert(!ret);
 
 	dcache_writeback_region(config->src_buf, size);
 
@@ -409,8 +401,16 @@ static int spi_slave_init(struct spi *spi)
 	config->buffer_size = spi->buffer_size;
 
 	spi->completion.private = NULL;
-	return schedule_task_init(&spi->completion, SOF_SCHEDULE_EDF,
-			SOF_TASK_PRI_MED, spi_completion_work, spi, 0, 0);
+
+	ret = schedule_task_init_ll(&spi->completion, SOF_SCHEDULE_LL_DMA,
+				    SOF_TASK_PRI_MED, spi_completion_work,
+				    spi, 0, 0);
+	if (ret < 0)
+		return ret;
+
+	schedule_task(&spi->completion, 0, 100);
+
+	return 0;
 }
 
 int spi_probe(struct spi *spi)
@@ -428,12 +428,12 @@ int spi_probe(struct spi *spi)
 		return -ENODEV;
 
 	spi->chan[SPI_DIR_RX] = dma_channel_get(spi->dma[SPI_DIR_RX], 0);
-	if (spi->chan[SPI_DIR_RX] < 0)
-		return spi->chan[SPI_DIR_RX];
+	if (!spi->chan[SPI_DIR_RX])
+		return -ENODEV;
 
 	spi->chan[SPI_DIR_TX] = dma_channel_get(spi->dma[SPI_DIR_TX], 0);
-	if (spi->chan[SPI_DIR_TX] < 0)
-		return spi->chan[SPI_DIR_TX];
+	if (!spi->chan[SPI_DIR_TX])
+		return -ENODEV;
 
 	spi->gpio = gpio_get(PLATFORM_SPI_GPIO_ID);
 	if (!spi->gpio)
@@ -446,14 +446,14 @@ int spi_probe(struct spi *spi)
 	/* configure the spi clock */
 	io_reg_write(SSI_SLAVE_CLOCK_CTL, 0x00000001);
 
-	spi->rx_buffer = rzalloc(RZONE_SYS_RUNTIME, SOF_MEM_CAPS_DMA,
+	spi->rx_buffer = rzalloc(SOF_MEM_ZONE_SYS_RUNTIME, 0, SOF_MEM_CAPS_DMA,
 				 SPI_BUFFER_SIZE);
 	if (spi->rx_buffer == NULL) {
 		trace_ipc_error("eSp");
 		return -ENOMEM;
 	}
 
-	spi->tx_buffer = rzalloc(RZONE_SYS_RUNTIME, SOF_MEM_CAPS_DMA,
+	spi->tx_buffer = rzalloc(SOF_MEM_ZONE_SYS_RUNTIME, 0, SOF_MEM_CAPS_DMA,
 				 SPI_BUFFER_SIZE);
 	spi->buffer_size = SPI_BUFFER_SIZE;
 	if (spi->tx_buffer == NULL) {
@@ -464,14 +464,10 @@ int spi_probe(struct spi *spi)
 
 	spi->ipc_status = IPC_READ;
 
-	dma_set_cb(spi->dma[SPI_DIR_RX], spi->chan[SPI_DIR_RX],
-		   DMA_CB_TYPE_IRQ, spi_dma_complete, spi);
-	dma_set_cb(spi->dma[SPI_DIR_TX], spi->chan[SPI_DIR_TX],
-		   DMA_CB_TYPE_IRQ, spi_dma_complete, spi);
-
 	return spi_slave_init(spi);
 }
 
+/* lock */
 spinlock_t spi_lock;
 static struct spi *spi_devices;
 static unsigned int n_spi_devices;
@@ -505,7 +501,8 @@ int spi_install(const struct spi_platform_data *plat, size_t n)
 		goto unlock;
 	}
 
-	spi_devices = rmalloc(RZONE_SYS, SOF_MEM_CAPS_RAM, sizeof(*spi) * n);
+	spi_devices = rmalloc(SOF_MEM_ZONE_SYS, 0, SOF_MEM_CAPS_RAM,
+			      sizeof(*spi) * n);
 	if (!spi_devices) {
 		ret = -ENOMEM;
 		goto unlock;

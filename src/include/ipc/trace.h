@@ -13,11 +13,12 @@
  * \author Keyon Jie <yang.jie@linux.intel.com>
  */
 
-#ifndef __INCLUDE_UAPI_IPC_TRACE_H__
-#define __INCLUDE_UAPI_IPC_TRACE_H__
+#ifndef __IPC_TRACE_H__
+#define __IPC_TRACE_H__
 
 #include <ipc/header.h>
 #include <ipc/stream.h>
+#include <stdint.h>
 
 /*
  * DMA for Trace
@@ -83,4 +84,4 @@ struct sof_ipc_panic_info {
 	uint32_t linenum;
 } __attribute__((packed));
 
-#endif
+#endif /* __IPC_TRACE_H__ */

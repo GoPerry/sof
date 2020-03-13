@@ -9,25 +9,28 @@
 #include <stdlib.h>
 #include <sof/string.h>
 #include <math.h>
-#include <arch/sof.h>
-#include <sof/task.h>
-#include <sof/alloc.h>
-#include <sof/ipc.h>
-#include <sof/dai.h>
-#include <sof/dma.h>
-#include <sof/schedule.h>
-#include <sof/wait.h>
-#include <sof/ipc.h>
+#include <sof/sof.h>
+#include <sof/schedule/task.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/notifier.h>
+#include <sof/drivers/ipc.h>
+#include <sof/lib/dai.h>
+#include <sof/lib/dma.h>
+#include <sof/schedule/edf_schedule.h>
+#include <sof/schedule/schedule.h>
+#include <sof/lib/wait.h>
 #include <sof/audio/pipeline.h>
 #include "testbench/common_test.h"
-#include "testbench/topology.h"
+#include <tplg_parser/topology.h>
 
 /* testbench helper functions for pipeline setup and trigger */
 
 int tb_pipeline_setup(struct sof *sof)
 {
 	/* init components */
-	sys_comp_init();
+	sys_comp_init(sof);
+
+	init_system_notify(sof);
 
 	/* init IPC */
 	if (ipc_init(sof) < 0) {
@@ -36,8 +39,8 @@ int tb_pipeline_setup(struct sof *sof)
 	}
 
 	/* init scheduler */
-	if (scheduler_init() < 0) {
-		fprintf(stderr, "error: scheduler init\n");
+	if (scheduler_init_edf() < 0) {
+		fprintf(stderr, "error: edf scheduler init\n");
 		return -EINVAL;
 	}
 
@@ -47,8 +50,7 @@ int tb_pipeline_setup(struct sof *sof)
 }
 
 /* set up pcm params, prepare and trigger pipeline */
-int tb_pipeline_start(struct ipc *ipc, int nch,
-		      struct sof_ipc_pipe_new *ipc_pipe,
+int tb_pipeline_start(struct ipc *ipc, struct sof_ipc_pipe_new *ipc_pipe,
 		      struct testbench_prm *tp)
 {
 	struct ipc_comp_dev *pcm_dev;
@@ -57,14 +59,14 @@ int tb_pipeline_start(struct ipc *ipc, int nch,
 	int ret;
 
 	/* set up pipeline params */
-	ret = tb_pipeline_params(ipc, nch, ipc_pipe, tp);
+	ret = tb_pipeline_params(ipc, ipc_pipe, tp);
 	if (ret < 0) {
 		fprintf(stderr, "error: pipeline params\n");
 		return -EINVAL;
 	}
 
 	/* Get IPC component device for pipeline */
-	pcm_dev = ipc_get_comp(ipc, ipc_pipe->sched_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, ipc_pipe->sched_id);
 	if (!pcm_dev) {
 		fprintf(stderr, "error: ipc get comp\n");
 		return -EINVAL;
@@ -86,8 +88,7 @@ int tb_pipeline_start(struct ipc *ipc, int nch,
 }
 
 /* pipeline pcm params */
-int tb_pipeline_params(struct ipc *ipc, int nch,
-		       struct sof_ipc_pipe_new *ipc_pipe,
+int tb_pipeline_params(struct ipc *ipc, struct sof_ipc_pipe_new *ipc_pipe,
 		       struct testbench_prm *tp)
 {
 	struct ipc_comp_dev *pcm_dev;
@@ -107,27 +108,27 @@ int tb_pipeline_params(struct ipc *ipc, int nch,
 	/* set pcm params */
 	params.comp_id = ipc_pipe->comp_id;
 	params.params.buffer_fmt = SOF_IPC_BUFFER_INTERLEAVED;
-	params.params.frame_fmt = find_format(tp->bits_in);
+	params.params.frame_fmt = tp->frame_fmt;
 	params.params.direction = SOF_IPC_STREAM_PLAYBACK;
 	params.params.rate = tp->fs_in;
-	params.params.channels = nch;
+	params.params.channels = tp->channels;
 	switch (params.params.frame_fmt) {
 	case(SOF_IPC_FRAME_S16_LE):
 		params.params.sample_container_bytes = 2;
 		params.params.sample_valid_bytes = 2;
-		params.params.host_period_bytes = fs_period * nch *
+		params.params.host_period_bytes = fs_period * tp->channels *
 			params.params.sample_container_bytes;
 		break;
 	case(SOF_IPC_FRAME_S24_4LE):
 		params.params.sample_container_bytes = 4;
 		params.params.sample_valid_bytes = 3;
-		params.params.host_period_bytes = fs_period * nch *
+		params.params.host_period_bytes = fs_period * tp->channels *
 			params.params.sample_container_bytes;
 		break;
 	case(SOF_IPC_FRAME_S32_LE):
 		params.params.sample_container_bytes = 4;
 		params.params.sample_valid_bytes = 4;
-		params.params.host_period_bytes = fs_period * nch *
+		params.params.host_period_bytes = fs_period * tp->channels *
 			params.params.sample_container_bytes;
 		break;
 	default:
@@ -136,7 +137,7 @@ int tb_pipeline_params(struct ipc *ipc, int nch,
 	}
 
 	/* get scheduling component device for pipeline*/
-	pcm_dev = ipc_get_comp(ipc, ipc_pipe->sched_id);
+	pcm_dev = ipc_get_comp_by_id(ipc, ipc_pipe->sched_id);
 	if (!pcm_dev) {
 		fprintf(stderr, "error: ipc get comp\n");
 		return -EINVAL;
@@ -159,8 +160,7 @@ int tb_pipeline_params(struct ipc *ipc, int nch,
 }
 
 /* getindex of shared library from table */
-int get_index_by_name(char *comp_type,
-		      struct shared_lib_table *lib_table)
+int get_index_by_name(char *comp_type, struct shared_lib_table *lib_table)
 {
 	int i;
 
@@ -173,8 +173,7 @@ int get_index_by_name(char *comp_type,
 }
 
 /* getindex of shared library from table by widget type*/
-int get_index_by_type(uint32_t comp_type,
-		      struct shared_lib_table *lib_table)
+int get_index_by_type(uint32_t comp_type, struct shared_lib_table *lib_table)
 {
 	int i;
 
@@ -207,7 +206,7 @@ void dma_put(struct dma *dma)
 }
 
 int dma_sg_alloc(struct dma_sg_elem_array *elem_array,
-		 int zone,
+		 enum mem_zone zone,
 		 uint32_t direction,
 		 uint32_t buffer_count, uint32_t buffer_bytes,
 		 uintptr_t dma_buffer_addr, uintptr_t external_addr)

@@ -5,21 +5,68 @@
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //         Keyon Jie <yang.jie@linux.intel.com>
 
-#include <stdint.h>
-#include <stddef.h>
-#include <errno.h>
-#include <sof/sof.h>
-#include <sof/lock.h>
-#include <sof/list.h>
-#include <sof/stream.h>
-#include <sof/alloc.h>
-#include <sof/debug.h>
-#include <sof/ipc.h>
-#include <platform/timer.h>
-#include <platform/platform.h>
-#include <sof/audio/component.h>
-#include <sof/audio/pipeline.h>
 #include <sof/audio/buffer.h>
+#include <sof/audio/component.h>
+#include <sof/drivers/interrupt.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cache.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/notifier.h>
+#include <sof/list.h>
+#include <sof/spinlock.h>
+#include <ipc/topology.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+
+struct comp_buffer *buffer_alloc(uint32_t size, uint32_t caps, uint32_t align)
+{
+	struct comp_buffer *buffer;
+
+	tracev_buffer("buffer_alloc()");
+
+	/* validate request */
+	if (size == 0 || size > HEAP_BUFFER_SIZE) {
+		trace_buffer_error("buffer_alloc() error: "
+				   "new size = %u is invalid", size);
+		return NULL;
+	}
+
+	/* allocate new buffer */
+	buffer = rzalloc(SOF_MEM_ZONE_RUNTIME, 0, SOF_MEM_CAPS_RAM,
+			 sizeof(*buffer));
+	if (!buffer) {
+		trace_buffer_error("buffer_alloc() error: "
+				   "could not alloc structure");
+		return NULL;
+	}
+
+	buffer->lock = rzalloc(SOF_MEM_ZONE_RUNTIME, SOF_MEM_FLAG_SHARED,
+			       SOF_MEM_CAPS_RAM, sizeof(*buffer->lock));
+	if (!buffer->lock) {
+		rfree(buffer);
+		trace_buffer_error("buffer_alloc() error: could not alloc lock");
+		return NULL;
+	}
+
+	buffer->stream.addr = rballoc_align(0, caps, size, align);
+	if (!buffer->stream.addr) {
+		rfree(buffer);
+		trace_buffer_error("buffer_alloc() error: "
+				   "could not alloc size = %u "
+				   "bytes of type = %u",
+				   size, caps);
+		return NULL;
+	}
+
+	buffer_init(buffer, size, caps);
+
+	list_init(&buffer->source_list);
+	list_init(&buffer->sink_list);
+	spinlock_init(buffer->lock);
+
+	return buffer;
+}
 
 /* create a new component in the pipeline */
 struct comp_buffer *buffer_new(struct sof_ipc_buffer *desc)
@@ -28,183 +75,153 @@ struct comp_buffer *buffer_new(struct sof_ipc_buffer *desc)
 
 	trace_buffer("buffer_new()");
 
-	/* validate request */
-	if (desc->size == 0 || desc->size > HEAP_BUFFER_SIZE) {
-		trace_buffer_error("buffer_new() error: "
-				   "new size = %u is invalid", desc->size);
-		return NULL;
+	/* allocate buffer */
+	buffer = buffer_alloc(desc->size, desc->caps, PLATFORM_DCACHE_ALIGN);
+	if (buffer) {
+		buffer->id = desc->comp.id;
+		buffer->pipeline_id = desc->comp.pipeline_id;
+		buffer->core = desc->comp.core;
+
+		dcache_writeback_invalidate_region(buffer, sizeof(*buffer));
 	}
-
-	/* allocate new buffer */
-	buffer = rzalloc(RZONE_RUNTIME, SOF_MEM_CAPS_RAM, sizeof(*buffer));
-	if (!buffer) {
-		trace_buffer_error("buffer_new() error: "
-				   "could not alloc structure");
-		return NULL;
-	}
-
-	buffer->addr = rballoc(RZONE_BUFFER, desc->caps, desc->size);
-	if (!buffer->addr) {
-		rfree(buffer);
-		trace_buffer_error("buffer_new() error: "
-				   "could not alloc size = %u "
-				   "bytes of type = %u",
-				   desc->size, desc->caps);
-		return NULL;
-	}
-
-	assert(!memcpy_s(&buffer->ipc_buffer, sizeof(buffer->ipc_buffer),
-		       desc, sizeof(*desc)));
-
-	buffer->size = desc->size;
-	buffer->alloc_size = desc->size;
-	buffer->w_ptr = buffer->addr;
-	buffer->r_ptr = buffer->addr;
-	buffer->end_addr = buffer->addr + buffer->ipc_buffer.size;
-	buffer->free = buffer->ipc_buffer.size;
-	buffer->avail = 0;
-
-	buffer_zero(buffer);
-
-	spinlock_init(&buffer->lock);
 
 	return buffer;
+}
+
+int buffer_set_size(struct comp_buffer *buffer, uint32_t size)
+{
+	void *new_ptr = NULL;
+
+	/* validate request */
+	if (size == 0 || size > HEAP_BUFFER_SIZE) {
+		trace_buffer_error_with_ids(buffer, "resize error: size = %u is invalid",
+					    size);
+		return -EINVAL;
+	}
+
+	if (size == buffer->stream.size)
+		return 0;
+
+	new_ptr = rbrealloc(buffer->stream.addr, 0, buffer->caps, size);
+
+	/* we couldn't allocate bigger chunk */
+	if (!new_ptr && size > buffer->stream.size) {
+		trace_buffer_error_with_ids(buffer, "resize error: can't alloc %u bytes type %u",
+					    buffer->stream.size, buffer->caps);
+		return -ENOMEM;
+	}
+
+	/* use bigger chunk, else just use the old chunk but set smaller */
+	if (new_ptr)
+		buffer->stream.addr = new_ptr;
+
+	buffer_init(buffer, size, buffer->caps);
+
+	return 0;
 }
 
 /* free component in the pipeline */
 void buffer_free(struct comp_buffer *buffer)
 {
-	trace_buffer("buffer_free()");
+	struct buffer_cb_free cb_data = {
+		.buffer = buffer,
+	};
+
+	tracev_buffer_with_ids(buffer, "buffer_free()");
+
+	notifier_event(buffer, NOTIFIER_ID_BUFFER_FREE,
+		       NOTIFIER_TARGET_CORE_LOCAL, &cb_data, sizeof(cb_data));
+
+	/* In case some listeners didn't unregister from buffer's callbacks */
+	notifier_unregister_all(NULL, buffer);
 
 	list_item_del(&buffer->source_list);
 	list_item_del(&buffer->sink_list);
-	rfree(buffer->addr);
+	rfree(buffer->stream.addr);
+	rfree(buffer->lock);
 	rfree(buffer);
 }
 
 void comp_update_buffer_produce(struct comp_buffer *buffer, uint32_t bytes)
 {
-	uint32_t flags;
-	uint32_t head = bytes;
-	uint32_t tail = 0;
+	uint32_t flags = 0;
+	struct buffer_cb_transact cb_data = {
+		.buffer = buffer,
+		.transaction_amount = bytes,
+		.transaction_begin_address = buffer->stream.w_ptr,
+	};
+	char *addr;
 
 	/* return if no bytes */
 	if (!bytes) {
-		trace_buffer("comp_update_buffer_produce(), "
-			     "no bytes to produce");
+		trace_buffer_with_ids(buffer,
+				      "comp_update_buffer_produce(), no bytes to produce, source->comp.id = %u, source->comp.type = %u, sink->comp.id = %u, sink->comp.type = %u",
+				      dev_comp_id(buffer->source),
+				      dev_comp_type(buffer->source),
+				      dev_comp_id(buffer->sink),
+				      dev_comp_type(buffer->sink));
 		return;
 	}
 
-	spin_lock_irq(&buffer->lock, flags);
+	buffer_lock(buffer, &flags);
 
-	/* calculate head and tail size for dcache circular wrap ops */
-	if (buffer->w_ptr + bytes > buffer->end_addr) {
-		head = buffer->end_addr - buffer->w_ptr;
-		tail = bytes - head;
-	}
+	audio_stream_produce(&buffer->stream, bytes);
 
-	/*
-	 * new data produce, handle consistency for buffer and cache:
-	 * 1. source(DMA) --> buffer --> sink(non-DMA): invalidate cache.
-	 * 2. source(non-DMA) --> buffer --> sink(DMA): write back to memory.
-	 * 3. source(DMA) --> buffer --> sink(DMA): do nothing.
-	 * 4. source(non-DMA) --> buffer --> sink(non-DMA): do nothing.
-	 */
-	if (buffer->source->is_dma_connected &&
-	    !buffer->sink->is_dma_connected) {
-		/* need invalidate cache for sink component to use */
-		dcache_invalidate_region(buffer->w_ptr, head);
-		if (tail)
-			dcache_invalidate_region(buffer->addr, tail);
-	} else if (!buffer->source->is_dma_connected &&
-		   buffer->sink->is_dma_connected) {
-		/* need write back to memory for sink component to use */
-		dcache_writeback_region(buffer->w_ptr, head);
-		if (tail)
-			dcache_writeback_region(buffer->addr, tail);
-	}
+	notifier_event(buffer, NOTIFIER_ID_BUFFER_PRODUCE,
+		       NOTIFIER_TARGET_CORE_LOCAL, &cb_data, sizeof(cb_data));
 
-	buffer->w_ptr += bytes;
+	buffer_unlock(buffer, flags);
 
-	/* check for pointer wrap */
-	if (buffer->w_ptr >= buffer->end_addr)
-		buffer->w_ptr = buffer->addr +
-			(buffer->w_ptr - buffer->end_addr);
+	addr = buffer->stream.addr;
 
-	/* calculate available bytes */
-	if (buffer->r_ptr < buffer->w_ptr)
-		buffer->avail = buffer->w_ptr - buffer->r_ptr;
-	else if (buffer->r_ptr == buffer->w_ptr)
-		buffer->avail = buffer->size; /* full */
-	else
-		buffer->avail = buffer->size - (buffer->r_ptr - buffer->w_ptr);
-
-	/* calculate free bytes */
-	buffer->free = buffer->size - buffer->avail;
-
-	if (buffer->cb && buffer->cb_type & BUFF_CB_TYPE_PRODUCE)
-		buffer->cb(buffer->cb_data, bytes);
-
-	spin_unlock_irq(&buffer->lock, flags);
-
-	tracev_buffer("comp_update_buffer_produce(), ((buffer->avail << 16) | "
-		      "buffer->free) = %08x, ((buffer->ipc_buffer.comp.id << "
-		      "16) | buffer->size) = %08x",
-		      (buffer->avail << 16) | buffer->free,
-		      (buffer->ipc_buffer.comp.id << 16) | buffer->size);
-	tracev_buffer("comp_update_buffer_produce(), ((buffer->r_ptr - buffer"
-		      "->addr) << 16 | (buffer->w_ptr - buffer->addr)) = %08x",
-		      (buffer->r_ptr - buffer->addr) << 16 |
-		      (buffer->w_ptr - buffer->addr));
+	tracev_buffer_with_ids(buffer,
+			       "comp_update_buffer_produce(), ((buffer->avail << 16) | buffer->free) = %08x, ((buffer->id << 16) | buffer->size) = %08x",
+			       (buffer->stream.avail << 16) |
+			       buffer->stream.free,
+			       (buffer->id << 16) | buffer->stream.size);
+	tracev_buffer_with_ids(buffer,
+			       "comp_update_buffer_produce(), ((buffer->r_ptr - buffer->addr) << 16 | (buffer->w_ptr - buffer->addr)) = %08x",
+			       ((char *)buffer->stream.r_ptr - addr) << 16 |
+			       ((char *)buffer->stream.w_ptr - addr));
 }
 
 void comp_update_buffer_consume(struct comp_buffer *buffer, uint32_t bytes)
 {
-	uint32_t flags;
+	uint32_t flags = 0;
+	struct buffer_cb_transact cb_data = {
+		.buffer = buffer,
+		.transaction_amount = bytes,
+		.transaction_begin_address = buffer->stream.r_ptr,
+	};
+	char *addr;
 
 	/* return if no bytes */
 	if (!bytes) {
-		trace_buffer("comp_update_buffer_consume(), "
-			     "no bytes to consume");
+		trace_buffer_with_ids(buffer,
+				      "comp_update_buffer_consume(), no bytes to consume, source->comp.id = %u, source->comp.type = %u, sink->comp.id = %u, sink->comp.type = %u",
+				      dev_comp_id(buffer->source),
+				      dev_comp_type(buffer->source),
+				      dev_comp_id(buffer->sink),
+				      dev_comp_type(buffer->sink));
 		return;
 	}
 
-	spin_lock_irq(&buffer->lock, flags);
+	buffer_lock(buffer, &flags);
 
-	buffer->r_ptr += bytes;
+	audio_stream_consume(&buffer->stream, bytes);
 
-	/* check for pointer wrap */
-	if (buffer->r_ptr >= buffer->end_addr)
-		buffer->r_ptr = buffer->addr +
-			(buffer->r_ptr - buffer->end_addr);
+	notifier_event(buffer, NOTIFIER_ID_BUFFER_CONSUME,
+		       NOTIFIER_TARGET_CORE_LOCAL, &cb_data, sizeof(cb_data));
 
-	/* calculate available bytes */
-	if (buffer->r_ptr < buffer->w_ptr)
-		buffer->avail = buffer->w_ptr - buffer->r_ptr;
-	else if (buffer->r_ptr == buffer->w_ptr)
-		buffer->avail = 0; /* empty */
-	else
-		buffer->avail = buffer->size - (buffer->r_ptr - buffer->w_ptr);
+	buffer_unlock(buffer, flags);
 
-	/* calculate free bytes */
-	buffer->free = buffer->size - buffer->avail;
+	addr = buffer->stream.addr;
 
-	if (buffer->sink->is_dma_connected &&
-	    !buffer->source->is_dma_connected)
-		dcache_writeback_region(buffer->r_ptr, bytes);
-
-	if (buffer->cb && buffer->cb_type & BUFF_CB_TYPE_CONSUME)
-		buffer->cb(buffer->cb_data, bytes);
-
-	spin_unlock_irq(&buffer->lock, flags);
-
-	tracev_buffer("comp_update_buffer_consume(), "
-		      "(buffer->avail << 16) | buffer->free = %08x, "
-		      "(buffer->ipc_buffer.comp.id << 16) | buffer->size = "
-		      " %08x, (buffer->r_ptr - buffer->addr) << 16 | "
-		      "(buffer->w_ptr - buffer->addr)) = %08x",
-		      (buffer->avail << 16) | buffer->free,
-		      (buffer->ipc_buffer.comp.id << 16) | buffer->size,
-		      (buffer->r_ptr - buffer->addr) << 16 |
-		      (buffer->w_ptr - buffer->addr));
+	tracev_buffer_with_ids(buffer,
+			       "comp_update_buffer_consume(), (buffer->avail << 16) | buffer->free = %08x, (buffer->id << 16) | buffer->size = %08x, (buffer->r_ptr - buffer->addr) << 16 | (buffer->w_ptr - buffer->addr)) = %08x",
+			       (buffer->stream.avail << 16) |
+			       buffer->stream.free,
+			       (buffer->id << 16) | buffer->stream.size,
+			       ((char *)buffer->stream.r_ptr - addr) << 16 |
+			       ((char *)buffer->stream.w_ptr - addr));
 }

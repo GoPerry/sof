@@ -9,39 +9,48 @@
  * initialisation functions.
  */
 
-#include <stddef.h>
+#include <sof/debug/panic.h>
+#include <sof/drivers/interrupt.h>
 #include <sof/init.h>
-#include <sof/task.h>
-#include <sof/debug.h>
-#include <sof/panic.h>
-#include <sof/alloc.h>
-#include <sof/notifier.h>
-#include <sof/schedule.h>
-#include <sof/trace.h>
-#include <sof/dma-trace.h>
-#include <sof/pm_runtime.h>
-#include <sof/cpu.h>
-#include <platform/idc.h>
-#include <platform/platform.h>
-#include <platform/memory.h>
+#include <sof/lib/alloc.h>
+#include <sof/lib/cpu.h>
+#include <sof/lib/memory.h>
+#include <sof/lib/notifier.h>
+#include <sof/lib/pm_runtime.h>
+#include <sof/platform.h>
+#include <sof/schedule/task.h>
+#include <sof/sof.h>
+#include <sof/trace/trace.h>
+#include <ipc/trace.h>
 
 /* main firmware context */
 static struct sof sof;
 
-int master_core_init(struct sof *sof)
+struct sof *sof_get(void)
+{
+	return &sof;
+}
+
+int master_core_init(int argc, char *argv[], struct sof *sof)
 {
 	int err;
 
+	/* setup context */
+	sof->argc = argc;
+	sof->argv = argv;
+
 	/* init architecture */
 	trace_point(TRACE_BOOT_ARCH);
-	err = arch_init(sof);
+	err = arch_init();
 	if (err < 0)
 		panic(SOF_IPC_PANIC_ARCH);
 
 	/* initialise system services */
 	trace_point(TRACE_BOOT_SYS_HEAP);
-	platform_init_memmap();
+	platform_init_memmap(sof);
 	init_heap(sof);
+
+	interrupt_init(sof);
 
 #if CONFIG_TRACE
 	trace_point(TRACE_BOOT_SYS_TRACES);
@@ -52,7 +61,7 @@ int master_core_init(struct sof *sof)
 	init_system_notify(sof);
 
 	trace_point(TRACE_BOOT_SYS_POWER);
-	pm_runtime_init();
+	pm_runtime_init(sof);
 
 	/* init the platform */
 	err = platform_init(sof);
@@ -62,7 +71,7 @@ int master_core_init(struct sof *sof)
 	trace_point(TRACE_BOOT_PLATFORM);
 
 	/* should not return */
-	err = do_task_master_core(sof);
+	err = task_main_start(sof);
 
 	return err;
 }
@@ -73,12 +82,8 @@ int main(int argc, char *argv[])
 
 	trace_point(TRACE_BOOT_START);
 
-	/* setup context */
-	sof.argc = argc;
-	sof.argv = argv;
-
 	if (cpu_get_id() == PLATFORM_MASTER_CORE_ID)
-		err = master_core_init(&sof);
+		err = master_core_init(argc, argv, &sof);
 	else
 		err = slave_core_init(&sof);
 
