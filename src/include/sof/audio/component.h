@@ -47,7 +47,6 @@ struct sof_ipc_stream_posn;
 struct dai_hw_params;
 
 /** \addtogroup component_api Component API
- *  Component API specification.
  *  @{
  */
 
@@ -119,16 +118,28 @@ struct dai_hw_params;
 /** \name Trace macros
  *  @{
  */
+
+/** \brief Retrieves uid from the component driver */
 #define trace_comp_drv_get_uid(drv_p) ((drv_p)->uid)
+
+/** \brief Retrieves id (-1 = undefined) from the component driver */
 #define trace_comp_drv_get_id(drv_p) (-1)
+
+/** \brief Retrieves subid (-1 = undefined) from the component driver */
 #define trace_comp_drv_get_subid(drv_p) (-1)
 
+/** \brief Retrieves uid from the component device */
 #define trace_comp_get_uid(comp_p) ((comp_p)->drv->uid)
+
+/** \brief Retrieves id (pipe id) from the component device */
 #define trace_comp_get_id(comp_p) ((comp_p)->comp.pipeline_id)
+
+/** \brief Retrieves subid (comp id) from the component device */
 #define trace_comp_get_subid(comp_p) ((comp_p)->comp.id)
 
 /* class (driver) level (no device object) tracing */
 
+/** \brief Trace error message from component driver (no comp instance) */
 #define comp_cl_err(drv_p, __e, ...)		\
 	trace_dev_err(TRACE_CLASS_COMP,		\
 		      trace_comp_drv_get_uid,	\
@@ -137,6 +148,7 @@ struct dai_hw_params;
 		      drv_p,			\
 		      __e, ##__VA_ARGS__)
 
+/** \brief Trace warning message from component driver (no comp instance) */
 #define comp_cl_warn(drv_p, __e, ...)		\
 	trace_dev_warn(TRACE_CLASS_COMP,	\
 		       trace_comp_drv_get_uid,	\
@@ -145,6 +157,7 @@ struct dai_hw_params;
 		       drv_p,			\
 		       __e, ##__VA_ARGS__)
 
+/** \brief Trace info message from component driver (no comp instance) */
 #define comp_cl_info(drv_p, __e, ...)		\
 	trace_dev_info(TRACE_CLASS_COMP,	\
 		       trace_comp_drv_get_uid,	\
@@ -153,6 +166,7 @@ struct dai_hw_params;
 		       drv_p,			\
 		       __e, ##__VA_ARGS__)
 
+/** \brief Trace debug message from component driver (no comp instance) */
 #define comp_cl_dbg(drv_p, __e, ...)		\
 	trace_dev_dbg(TRACE_CLASS_COMP,		\
 		      trace_comp_drv_get_uid,	\
@@ -163,18 +177,22 @@ struct dai_hw_params;
 
 /* device tracing */
 
+/** \brief Trace error message from component device */
 #define comp_err(comp_p, __e, ...)					\
 	trace_dev_err(TRACE_CLASS_COMP, trace_comp_get_uid, trace_comp_get_id, \
 		      trace_comp_get_subid, comp_p, __e, ##__VA_ARGS__)
 
+/** \brief Trace warning message from component device */
 #define comp_warn(comp_p, __e, ...)					\
 	trace_dev_warn(TRACE_CLASS_COMP, trace_comp_get_uid, trace_comp_get_id,\
 		       trace_comp_get_subid, comp_p, __e, ##__VA_ARGS__)
 
+/** \brief Trace info message from component device */
 #define comp_info(comp_p, __e, ...)					\
 	trace_dev_info(TRACE_CLASS_COMP, trace_comp_get_uid, trace_comp_get_id,\
 		       trace_comp_get_subid, comp_p, __e, ##__VA_ARGS__)
 
+/** \brief Trace debug message from component device */
 #define comp_dbg(comp_p, __e, ...)					\
 	trace_dev_dbg(TRACE_CLASS_COMP, trace_comp_get_uid, trace_comp_get_id, \
 		      trace_comp_get_subid, comp_p, __e, ##__VA_ARGS__)
@@ -182,86 +200,180 @@ struct dai_hw_params;
 
 /** @}*/
 
-/* \brief Type of endpoint this component is connected to in a pipeline */
+/** \brief Type of endpoint this component is connected to in a pipeline */
 enum comp_endpoint_type {
-	COMP_ENDPOINT_HOST,
-	COMP_ENDPOINT_DAI,
-	COMP_ENDPOINT_NODE
+	COMP_ENDPOINT_HOST,	/**< Connected to host dma */
+	COMP_ENDPOINT_DAI,	/**< Connected to dai dma */
+	COMP_ENDPOINT_NODE	/**< No dma connection */
 };
 
- /* \brief Type of component copy, which can be changed on runtime */
+/**
+ * \brief Type of next dma copy mode, changed on runtime.
+ *
+ * Supported by host as COMP_ATTR_COPY_TYPE parameter
+ * to comp_set_attribute().
+ */
 enum comp_copy_type {
-	COMP_COPY_NORMAL = 0,
-	COMP_COPY_BLOCKING,
-	COMP_COPY_ONE_SHOT,
+	COMP_COPY_NORMAL = 0,	/**< Normal */
+	COMP_COPY_BLOCKING,	/**< Blocking */
+	COMP_COPY_ONE_SHOT,	/**< One-shot */
 };
 
 struct comp_driver;
 
 /**
- * Audio component operations - all mandatory.
+ * Audio component operations.
  *
  * All component operations must return 0 for success, negative values for
- * errors and 1 to stop the pipeline walk operation.
+ * errors and 1 to stop the pipeline walk operation unless specified otherwise
+ * in the operation documentation.
  */
 struct comp_ops {
-	/** component creation */
+	/**
+	 * Creates a new component device.
+	 * @param drv Parent component driver.
+	 * @param comp Component parameters.
+	 * @return Pointer to the new component device.
+	 *
+	 * All required data objects should be allocated from the run-time
+	 * heap (RZONE_RUNTIME).
+	 * Any component-specific private data is allocated separately and
+	 * pointer is connected to the comp_dev::private by using
+	 * comp_set_drvdata() and later retrieved by comp_get_drvdata().
+	 *
+	 * All parameters should be initialized to their default values.
+	 */
 	struct comp_dev *(*new)(const struct comp_driver *drv,
 				struct sof_ipc_comp *comp);
 
-	/** component destruction */
+	/**
+	 * Called to delete the specified component device.
+	 * @param dev Component device to be deleted.
+	 *
+	 * All data structures previously allocated on the run-time heap
+	 * must be freed by the implementation of <code>free()</code>.
+	 */
 	void (*free)(struct comp_dev *dev);
 
-	/** set component audio stream parameters */
+	/**
+	 * Sets component audio stream parameters.
+	 * @param dev Component device.
+	 * @param params Audio (PCM) stream parameters to be set.
+	 */
 	int (*params)(struct comp_dev *dev,
 		      struct sof_ipc_stream_params *params);
 
-	/** get dai hw parameters */
+	/**
+	 * Fetches hardware stream parameters.
+	 * @param dev Component device.
+	 * @param params Receives copy of stream parameters retrieved from
+	 *	DAI hw settings.
+	 * @param dir Stream direction (see enum sof_ipc_stream_direction).
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_get_hw_params)(struct comp_dev *dev,
 				 struct sof_ipc_stream_params *params, int dir);
 
-	/** set component audio stream parameters */
+	/**
+	 * Configures attached DAI.
+	 * @param dev Component device.
+	 * @param dai_config DAI configuration.
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_config)(struct comp_dev *dev,
 			  struct sof_ipc_dai_config *dai_config);
 
-	/** used to pass standard and bespoke commands (with optional data) */
+	/**
+	 * Used to pass standard and bespoke commands (with optional data).
+	 * @param dev Component device.
+	 * @param cmd Command.
+	 * @param data Command data.
+	 * @param max_data_size Max size of returned data acceptable by the
+	 *	caller in case of 'get' commands.
+	 */
 	int (*cmd)(struct comp_dev *dev, int cmd, void *data,
 		   int max_data_size);
 
-	/** atomic - used to start/stop/pause stream operations */
+	/**
+	 * Trigger, atomic - used to start/stop/pause stream operations.
+	 * @param dev Component device.
+	 * @param cmd Command, one of COMP_TRIGGER_...
+	 */
 	int (*trigger)(struct comp_dev *dev, int cmd);
 
-	/** prepare component after params are set */
+	/**
+	 * Prepares component after params are set.
+	 * @param dev Component device.
+	 */
 	int (*prepare)(struct comp_dev *dev);
 
-	/** reset component */
+	/**
+	 * Resets component.
+	 * @param dev Component device.
+	 */
 	int (*reset)(struct comp_dev *dev);
 
-	/** copy and process stream data from source to sink buffers */
+	/**
+	 * Copy and process stream data from source to sink buffers.
+	 * @param dev Component device.
+	 * @return Number of copied frames.
+	 */
 	int (*copy)(struct comp_dev *dev);
 
-	/** position */
+	/**
+	 * Retrieves component rendering position.
+	 * @param dev Component device.
+	 * @param posn Receives reported position.
+	 */
 	int (*position)(struct comp_dev *dev,
 		struct sof_ipc_stream_posn *posn);
 
-	/** set attribute in component */
+	/**
+	 * Sets attribute in component.
+	 * @param dev Component device.
+	 * @param type Attribute type.
+	 * @param value Attribute value.
+	 * @return 0 if succeeded, error code otherwise.
+	 */
 	int (*set_attribute)(struct comp_dev *dev, uint32_t type,
 			     void *value);
 
-	/* Configure timestamping */
+	/**
+	 * Configures timestamping in attached DAI.
+	 * @param dev Component device.
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_ts_config)(struct comp_dev *dev);
 
-	/* Start timestamping */
+	/**
+	 * Starts timestamping.
+	 * @param dev Component device.
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_ts_start)(struct comp_dev *dev);
 
-	/* Stop timestamping */
+	/**
+	 * Stops timestamping.
+	 * @param dev Component device.
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_ts_stop)(struct comp_dev *dev);
 
-	/* Get timestamp */
+	/**
+	 * Gets timestamp.
+	 * @param dev Component device.
+	 * @param tsd Receives timestamp data.
+	 *
+	 * Mandatory for components that allocate DAI.
+	 */
 	int (*dai_ts_get)(struct comp_dev *dev,
 			  struct timestamp_data *tsd);
 };
-
 
 /**
  * Audio component base driver "class"
@@ -273,15 +385,10 @@ struct comp_driver {
 	struct comp_ops ops;	/**< component operations */
 };
 
-/* \brief Holds constant pointer to component driver */
+/** \brief Holds constant pointer to component driver */
 struct comp_driver_info {
 	const struct comp_driver *drv;	/**< pointer to component driver */
 	struct list_item list;		/**< list of component drivers */
-};
-
-/* \brief Holds list of registered components' drivers */
-struct comp_driver_list {
-	struct list_item list;	/* list of component drivers */
 };
 
 /**
@@ -316,11 +423,10 @@ struct comp_dev {
 				  *  across cores
 				  */
 
-	/** common runtime configuration for downstream/upstream */
+	/* common runtime configuration for downstream/upstream */
 	uint32_t direction;	/**< enum sof_ipc_stream_direction */
 
-	/** driver */
-	const struct comp_driver *drv;
+	const struct comp_driver *drv;	/**< driver */
 
 	/* lists */
 	struct list_item bsource_list;	/**< list of source buffers */
@@ -336,7 +442,13 @@ struct comp_dev {
 	struct sof_ipc_comp comp;
 };
 
-/** \name Helpers.
+/** @}*/
+
+/* Common helper function used internally by the component implementations
+ * begin here.
+ */
+
+/** \addtogroup component_common_int Component's Common Helpers
  *  @{
  */
 
@@ -417,26 +529,22 @@ static inline struct sof_ipc_comp_config *comp_config(struct sof_ipc_comp *comp)
 	return (struct sof_ipc_comp_config *)(comp + 1);
 }
 
-/** \brief Sets the driver private data. */
+/**
+ * \brief Assigns private data to component device.
+ * @param c Component device.
+ * @param data Private data.
+ */
 #define comp_set_drvdata(c, data) \
 	(c->private = data)
 
-/** \brief Retrieves the driver private data. */
+/**
+ * \brief Retrieves driver private data from component device.
+ * @param c Component device.
+ * @return Private data.
+ */
 #define comp_get_drvdata(c) \
 	c->private
 
-/** \brief Retrieves the component device buffer list. */
-#define comp_buffer_list(comp, dir) \
-	((dir) == PPL_DIR_DOWNSTREAM ? &comp->bsink_list : \
-	 &comp->bsource_list)
-
-/** @}*/
-
-/** \name Declare module macro
- *  \brief Usage at the end of an independent module file:
- *         DECLARE_MODULE(sys_*_init);
- *  @{
- */
 #ifdef UNIT_TEST
 #define DECLARE_MODULE(init)
 #elif CONFIG_LIBRARY
@@ -444,11 +552,12 @@ static inline struct sof_ipc_comp_config *comp_config(struct sof_ipc_comp *comp)
 #define DECLARE_MODULE(init) __attribute__((constructor)) \
 	static void _module_init(void) { init(); }
 #else
+/** \brief Usage at the end of an independent module file:
+ *	DECLARE_MODULE(sys_*_init);
+ */
 #define DECLARE_MODULE(init) __attribute__((__used__)) \
 	__section(".module_init") static void(*f)(void) = init
 #endif
-
-/** @}*/
 
 /** \name Component registration
  *  @{
@@ -468,52 +577,6 @@ int comp_register(struct comp_driver_info *drv);
 void comp_unregister(struct comp_driver_info *drv);
 
 /** @}*/
-
-/** \name Component creation and destruction - mandatory
- *  @{
- */
-
-/**
- * Creates a new component device.
- * @param comp Parameters of the new component device.
- * @return Pointer to the new component device.
- */
-struct comp_dev *comp_new(struct sof_ipc_comp *comp);
-
-/**
- * Called to delete the specified component device.
- * All data structures previously allocated on the run-time heap
- * must be freed by the implementation of <code>free()</code>.
- * @param dev Component device to be deleted.
- */
-static inline void comp_free(struct comp_dev *dev)
-{
-	assert(dev->drv->ops.free);
-
-	/* free task if shared component */
-	if (dev->is_shared && dev->task) {
-		schedule_task_free(dev->task);
-		rfree(dev->task);
-	}
-
-	dev->drv->ops.free(dev);
-}
-
-/** @}*/
-
-/** \name Component API.
- *  @{
- */
-
-/**
- * Commits component's memory if it's shared.
- * @param dev Component device.
- */
-static inline void comp_shared_commit(struct comp_dev *dev)
-{
-	if (dev->is_shared)
-		platform_shared_commit(dev, sizeof(*dev));
-}
 
 /**
  * Component state set.
@@ -536,353 +599,6 @@ static inline void comp_shared_commit(struct comp_dev *dev)
  */
 int comp_set_state(struct comp_dev *dev, int cmd);
 
-/**
- * Parameter init for component on other core.
- * @param dev Component device.
- * @param params Parameters to be set.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_params_remote(struct comp_dev *dev,
-				     struct sof_ipc_stream_params *params)
-{
-	struct idc_msg msg = { IDC_MSG_PARAMS, IDC_MSG_PARAMS_EXT(dev->comp.id),
-		dev->comp.core, sizeof(*params), params, };
-
-	return idc_send_msg(&msg, IDC_BLOCKING);
-}
-
-/**
- * Component parameter init.
- * @param dev Component device.
- * @param params Audio (PCM) stream parameters to be set
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_params(struct comp_dev *dev,
-			      struct sof_ipc_stream_params *params)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.params)
-		ret = (dev->is_shared && !cpu_is_me(dev->comp.core)) ?
-			comp_params_remote(dev, params) :
-			dev->drv->ops.params(dev, params);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Fetch hardware stream parameters - only mandatory for DAI components.
- * @param dev Component device.
- * @param params hw parameters
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_dai_get_hw_params(struct comp_dev *dev,
-					 struct sof_ipc_stream_params *params,
-					 int dir)
-{
-	int ret = -EINVAL;
-
-	if (dev->drv->ops.dai_get_hw_params)
-		ret = dev->drv->ops.dai_get_hw_params(dev, params, dir);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Send component command.
- * @param dev Component device.
- * @param cmd Command.
- * @param data Command data.
- * @param max_data_size Max data size.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_cmd(struct comp_dev *dev, int cmd, void *data,
-			   int max_data_size)
-{
-	struct sof_ipc_ctrl_data *cdata = data;
-	int ret = -EINVAL;
-
-	if (cmd == COMP_CMD_SET_DATA &&
-	    (cdata->data->magic != SOF_ABI_MAGIC ||
-	     SOF_ABI_VERSION_INCOMPATIBLE(SOF_ABI_VERSION, cdata->data->abi))) {
-		comp_err(dev, "comp_cmd() error: invalid version, data->magic = %u, data->abi = %u",
-					 cdata->data->magic, cdata->data->abi);
-		goto out;
-	}
-
-	if (dev->drv->ops.cmd)
-		ret = dev->drv->ops.cmd(dev, cmd, data, max_data_size);
-
-out:
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Triggers command for component on other core.
- * @param dev Component device.
- * @param cmd Command to be triggered.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_trigger_remote(struct comp_dev *dev, int cmd)
-{
-	struct idc_msg msg = { IDC_MSG_TRIGGER,
-		IDC_MSG_TRIGGER_EXT(dev->comp.id), dev->comp.core, sizeof(cmd),
-		&cmd, };
-
-	return idc_send_msg(&msg, IDC_BLOCKING);
-}
-
-/**
- * Trigger component - mandatory and atomic.
- * @param dev Component device.
- * @param cmd Command.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_trigger(struct comp_dev *dev, int cmd)
-{
-	int ret = 0;
-
-	assert(dev->drv->ops.trigger);
-
-	ret = (dev->is_shared && !cpu_is_me(dev->comp.core)) ?
-		comp_trigger_remote(dev, cmd) : dev->drv->ops.trigger(dev, cmd);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Prepares component on other core.
- * @param dev Component device.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_prepare_remote(struct comp_dev *dev)
-{
-	struct idc_msg msg = { IDC_MSG_PREPARE,
-		IDC_MSG_PREPARE_EXT(dev->comp.id), dev->comp.core, };
-
-	return idc_send_msg(&msg, IDC_BLOCKING);
-}
-
-/**
- * Prepare component.
- * @param dev Component device.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_prepare(struct comp_dev *dev)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.prepare)
-		ret = (dev->is_shared && !cpu_is_me(dev->comp.core)) ?
-			comp_prepare_remote(dev) : dev->drv->ops.prepare(dev);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Copy component buffers - mandatory.
- * @param dev Component device.
- * @return Number of frames copied.
- */
-static inline int comp_copy(struct comp_dev *dev)
-{
-	int ret = 0;
-
-	assert(dev->drv->ops.copy);
-
-	/* copy only if we are the owner of the component */
-	if (cpu_is_me(dev->comp.core))
-		ret = dev->drv->ops.copy(dev);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Resets component on other core.
- * @param dev Component device.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_reset_remote(struct comp_dev *dev)
-{
-	struct idc_msg msg = { IDC_MSG_RESET,
-		IDC_MSG_RESET_EXT(dev->comp.id), dev->comp.core, };
-
-	return idc_send_msg(&msg, IDC_BLOCKING);
-}
-
-/**
- * Component reset and free runtime resources.
- * @param dev Component device.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_reset(struct comp_dev *dev)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.reset)
-		ret = (dev->is_shared && !cpu_is_me(dev->comp.core)) ?
-			comp_reset_remote(dev) : dev->drv->ops.reset(dev);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * DAI configuration - only mandatory for DAI components.
- * @param dev Component device.
- * @param config DAI configuration.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_dai_config(struct comp_dev *dev,
-	struct sof_ipc_dai_config *config)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.dai_config)
-		ret = dev->drv->ops.dai_config(dev, config);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Retrieves component rendering position.
- * @param dev Component device.
- * @param posn Position reported by the component device.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_position(struct comp_dev *dev,
-	struct sof_ipc_stream_posn *posn)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.position)
-		ret = dev->drv->ops.position(dev, posn);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/**
- * Sets component attribute.
- * @param dev Component device.
- * @param type Attribute type.
- * @param value Attribute value.
- * @return 0 if succeeded, error code otherwise.
- */
-static inline int comp_set_attribute(struct comp_dev *dev, uint32_t type,
-				     void *value)
-{
-	int ret = 0;
-
-	if (dev->drv->ops.set_attribute)
-		ret = dev->drv->ops.set_attribute(dev, type, value);
-
-	comp_shared_commit(dev);
-
-	return ret;
-}
-
-/** @}*/
-
-/** \name Components API for infrastructure.
- *  @{
- */
-
-/**
- * Allocates and initializes audio component list.
- * To be called once at boot time.
- */
-void sys_comp_init(struct sof *sof);
-
-/** @}*/
-
-/** \name Helpers.
- *  @{
- */
-
-/**
- * Checks if two component devices belong to the same parent pipeline.
- * @param current Component device.
- * @param previous Another component device.
- * @return 1 if children of the same pipeline, 0 otherwise.
- */
-static inline int comp_is_single_pipeline(struct comp_dev *current,
-					  struct comp_dev *previous)
-{
-	return dev_comp_pipe_id(current) == dev_comp_pipe_id(previous);
-}
-
-/**
- * Checks if component device is active.
- * @param current Component device.
- * @return 1 if active, 0 otherwise.
- */
-static inline int comp_is_active(struct comp_dev *current)
-{
-	return current->state == COMP_STATE_ACTIVE;
-}
-
-/**
- * Returns component state based on requested command.
- * @param cmd Request command.
- * @return Component state.
- */
-static inline int comp_get_requested_state(int cmd)
-{
-	int state = COMP_STATE_INIT;
-
-	switch (cmd) {
-	case COMP_TRIGGER_START:
-	case COMP_TRIGGER_RELEASE:
-		state = COMP_STATE_ACTIVE;
-		break;
-	case COMP_TRIGGER_PREPARE:
-	case COMP_TRIGGER_STOP:
-		state = COMP_STATE_PREPARE;
-		break;
-	case COMP_TRIGGER_PAUSE:
-		state = COMP_STATE_PAUSED;
-		break;
-	case COMP_TRIGGER_XRUN:
-	case COMP_TRIGGER_RESET:
-		state = COMP_STATE_READY;
-		break;
-	default:
-		break;
-	}
-
-	return state;
-}
-
-/* \brief Returns comp_endpoint_type of given component */
-static inline int comp_get_endpoint_type(struct comp_dev *dev)
-{
-	switch (dev_comp_type(dev)) {
-	case SOF_COMP_HOST:
-		return COMP_ENDPOINT_HOST;
-	case SOF_COMP_DAI:
-		return COMP_ENDPOINT_DAI;
-	default:
-		return COMP_ENDPOINT_NODE;
-	}
-}
-
 /* \brief Set component period frames */
 static inline void component_set_period_frames(struct comp_dev *current,
 					       uint32_t rate)
@@ -893,8 +609,6 @@ static inline void component_set_period_frames(struct comp_dev *current,
 	 */
 	current->frames = ceil_divide(rate * current->period, 1000000);
 }
-
-/** @}*/
 
 /** \name XRUN handling.
  *  @{
@@ -937,15 +651,7 @@ static inline void comp_overrun(struct comp_dev *dev, struct comp_buffer *sink,
 	pipeline_xrun(dev->pipeline, dev, bytes);
 }
 
-/**
- * Called to check whether component schedules its pipeline.
- * @param dev Component device.
- * @return True if this is scheduling component, false otherwise.
- */
-static inline bool comp_is_scheduling_source(struct comp_dev *dev)
-{
-	return dev == dev->pipeline->sched_comp;
-}
+/** @}*/
 
 /**
  * Called by component in copy.
@@ -968,19 +674,6 @@ void comp_get_copy_limits(struct comp_buffer *source, struct comp_buffer *sink,
  */
 int comp_verify_params(struct comp_dev *dev, uint32_t flag,
 		       struct sof_ipc_stream_params *params);
-/**
- * Called to reallocate component in shared memory.
- * @param dev Component device.
- * @return Pointer to reallocated component device.
- */
-struct comp_dev *comp_make_shared(struct comp_dev *dev);
-
-static inline struct comp_driver_list *comp_drivers_get(void)
-{
-	return sof_get()->comp_drivers;
-}
-
-/** @}*/
 
 /** @}*/
 

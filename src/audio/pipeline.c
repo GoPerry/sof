@@ -6,7 +6,7 @@
 //         Keyon Jie <yang.jie@linux.intel.com>
 
 #include <sof/audio/buffer.h>
-#include <sof/audio/component.h>
+#include <sof/audio/component_ext.h>
 #include <sof/audio/pipeline.h>
 #include <sof/debug/panic.h>
 #include <sof/drivers/interrupt.h>
@@ -14,6 +14,7 @@
 #include <sof/drivers/timer.h>
 #include <sof/lib/alloc.h>
 #include <sof/lib/mailbox.h>
+#include <sof/lib/uuid.h>
 #include <sof/list.h>
 #include <sof/math/numbers.h>
 #include <sof/schedule/ll_schedule.h>
@@ -37,6 +38,10 @@ struct pipeline_data {
 	int cmd;
 };
 
+/* f11818eb-e92e-4082-82a3-dc54c604ebb3 */
+DECLARE_SOF_UUID("pipe-task", pipe_task_uuid, 0xf11818eb, 0xe92e, 0x4082,
+		 0x82,  0xa3, 0xdc, 0x54, 0xc6, 0x04, 0xeb, 0xb3);
+
 static enum task_state pipeline_task(void *arg);
 
 /* create new pipeline - returns pipeline id or negative error */
@@ -58,9 +63,15 @@ struct pipeline *pipeline_new(struct sof_ipc_pipe_new *pipe_desc,
 
 	/* init pipeline */
 	p->sched_comp = cd;
-	p->posn_offset = pipe_desc->pipeline_id *
-		sizeof(struct sof_ipc_stream_posn);
 	p->status = COMP_STATE_INIT;
+
+	ret = pipeline_posn_offset_get(&p->posn_offset);
+	if (ret < 0) {
+		pipe_cl_err("pipeline_new() error: pipeline_posn_offset_get failed %d",
+			    ret);
+		rfree(p);
+		return NULL;
+	}
 
 	ret = memcpy_s(&p->ipc_pipe, sizeof(p->ipc_pipe),
 		       pipe_desc, sizeof(*pipe_desc));
@@ -257,6 +268,8 @@ int pipeline_free(struct pipeline *p)
 
 	ipc_msg_free(p->msg);
 
+	pipeline_posn_offset_put(p->posn_offset);
+
 	/* now free the pipeline */
 	rfree(p);
 
@@ -432,7 +445,8 @@ static struct task *pipeline_task_init(struct pipeline *p, uint32_t type,
 	if (!task)
 		return NULL;
 
-	if (schedule_task_init_ll(&task->task, type, p->ipc_pipe.priority, func,
+	if (schedule_task_init_ll(&task->task, SOF_UUID(pipe_task_uuid), type,
+				  p->ipc_pipe.priority, func,
 				  p, p->ipc_pipe.core, 0) < 0) {
 		rfree(task);
 		return NULL;

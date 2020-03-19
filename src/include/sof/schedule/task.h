@@ -27,9 +27,6 @@ struct sof;
 #define SOF_TASK_DEADLINE_ALMOST_IDLE	(SOF_TASK_DEADLINE_IDLE - 1)
 #define SOF_TASK_DEADLINE_NOW		0
 
-/** \brief EDF task's default stack size in bytes. */
-#define SOF_TASK_DEFAULT_STACK_SIZE	3072
-
 /** \brief Task states. */
 enum task_state {
 	SOF_TASK_STATE_INIT = 0,
@@ -53,6 +50,7 @@ struct task_ops {
 /** \brief Task used by schedulers. */
 struct task {
 	uint64_t start;		/**< start time */
+	uint32_t uid;		/**< Uuid */
 	uint16_t type;		/**< type of the task (LL or EDF) */
 	uint16_t priority;	/**< priority of the task (used by LL) */
 	uint16_t core;		/**< execution core */

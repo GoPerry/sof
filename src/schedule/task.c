@@ -8,13 +8,15 @@
  * Generic audio task.
  */
 
-#include <sof/audio/component.h>
+#include <sof/audio/component_ext.h>
+#include <sof/audio/pipeline.h>
 #include <sof/debug/panic.h>
 #include <sof/drivers/ipc.h>
 #include <sof/lib/alloc.h>
 #include <sof/lib/agent.h>
 #include <sof/lib/cpu.h>
 #include <sof/lib/memory.h>
+#include <sof/lib/uuid.h>
 #include <sof/lib/wait.h>
 #include <sof/platform.h>
 #include <sof/schedule/edf_schedule.h>
@@ -32,6 +34,10 @@
 #endif
 
 typedef enum task_state (*task_main)(void *);
+
+/* 37f1d41f-252d-448d-b9c4-1e2bee8e1bf1 */
+DECLARE_SOF_UUID("main-task", main_task_uuid, 0x37f1d41f, 0x252d, 0x448d,
+		 0xb9, 0xc4, 0x1e, 0x2b, 0xee, 0x8e, 0x1b, 0xf1);
 
 static void sys_module_init(void)
 {
@@ -79,7 +85,8 @@ void task_main_init(void)
 	*main_task = rzalloc(SOF_MEM_ZONE_SYS, 0, SOF_MEM_CAPS_RAM,
 			     sizeof(**main_task));
 
-	ret = schedule_task_init_edf(*main_task, &ops, NULL, cpu, 0);
+	ret = schedule_task_init_edf(*main_task, SOF_UUID(main_task_uuid),
+				     &ops, NULL, cpu, 0);
 	assert(!ret);
 }
 
@@ -97,6 +104,9 @@ int task_main_start(struct sof *sof)
 
 	/* init self-registered modules */
 	sys_module_init();
+
+	/* init pipeline position offsets */
+	pipeline_posn_init(sof);
 
 #if STATIC_PIPE
 	/* init static pipeline */

@@ -20,7 +20,6 @@
 #endif
 #include <sof/common.h>
 #include <sof/sof.h>
-#include <sof/spinlock.h>
 #include <sof/trace/preproc.h>
 #include <config.h>
 #include <stdint.h>
@@ -29,12 +28,7 @@
 #endif
 
 struct sof;
-
-struct trace {
-	uint32_t pos ;	/* trace position */
-	uint32_t enable;
-	spinlock_t lock; /* locking mechanism */
-};
+struct trace;
 
 /* bootloader trace values */
 #define TRACE_BOOT_LDR_ENTRY		0x100
@@ -422,11 +416,13 @@ do {									    \
 
 /** \brief Trace from a device on err level.
  *
- * \param class Trace class, one of TRACE_CLASS_...
- * \param get_id_m Macro that can retrieve device's id0 from the dev
- * \param get_subid_m Macro that can retrieve device's id1 from the dev
- * \param dev Device
- * \param fmt Format followed by parameters
+ * @param class Trace class, one of TRACE_CLASS_...
+ * @param get_uid_m Macro that can retrieve device's uid from the dev
+ * @param get_id_m Macro that can retrieve device's id0 from the dev
+ * @param get_subid_m Macro that can retrieve device's id1 from the dev
+ * @param dev Device
+ * @param fmt Format followed by parameters
+ * @param ... Parameters
  */
 #define trace_dev_err(class, get_uid_m, get_id_m, get_subid_m, dev, fmt, ...) \
 	trace_error_with_ids(class, get_uid_m(dev), get_id_m(dev),	      \

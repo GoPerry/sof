@@ -101,7 +101,8 @@ static void schedule_ll_tasks_execute(struct ll_schedule_data *sch,
 			/* don't enable irq, if no more tasks to do */
 			if (!atomic_sub(&sch->num_tasks, 1))
 				sch->domain->registered[cpu] = false;
-			trace_ll("task complete %p", (uintptr_t)task);
+			trace_ll("task complete %p %s", (uintptr_t)task,
+				 task->uid);
 			trace_ll("num_tasks %d total_num_tasks %d",
 				 atomic_read(&sch->num_tasks),
 				 atomic_read(&sch->domain->total_num_tasks));
@@ -296,8 +297,9 @@ static void schedule_ll_task(void *data, struct task *task, uint64_t start,
 
 	pdata = ll_sch_get_pdata(task);
 
-	trace_ll("task add %p task->priority %d start %u period %u",
-		 (uintptr_t)task, task->priority, start, period);
+	trace_ll("task add %p %s", (uintptr_t)task, task->uid);
+	trace_ll("task params pri %d flags %d start %u period %u",
+		 task->priority, task->flags, start, period);
 
 	pdata->period = period;
 
@@ -323,14 +325,16 @@ out:
 	irq_local_enable(flags);
 }
 
-int schedule_task_init_ll(struct task *task, uint16_t type, uint16_t priority,
+int schedule_task_init_ll(struct task *task,
+			  uint32_t uid, uint16_t type, uint16_t priority,
 			  enum task_state (*run)(void *data), void *data,
 			  uint16_t core, uint32_t flags)
 {
 	struct ll_task_pdata *ll_pdata;
 	int ret = 0;
 
-	ret = schedule_task_init(task, type, priority, run, data, core, flags);
+	ret = schedule_task_init(task, uid, type, priority, run, data, core,
+				 flags);
 	if (ret < 0)
 		return ret;
 
@@ -375,7 +379,7 @@ static void schedule_ll_task_cancel(void *data, struct task *task)
 
 	irq_local_disable(flags);
 
-	trace_ll("task cancel %p", (uintptr_t)task);
+	trace_ll("task cancel %p %s", (uintptr_t)task, task->uid);
 
 	/* check to see if we are scheduled */
 	list_for_item(tlist, &sch->tasks) {
